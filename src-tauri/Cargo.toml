@@ -1,0 +1,31 @@
+[package]
+name = "rayspeak"
+version = "0.2.0"
+description = "RaySpeak TeamSpeak voice client"
+edition = "2021"
+rust-version = "1.77.2"
+
+[lib]
+name = "rayspeak_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tsclient-rs = "0.2.7"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "fs", "io-util"] }
+base64 = "0.22"
+md-5 = "0.10"
+tauri-plugin-notification = "2.4.0"
+tauri-plugin-deep-link = "2"
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
+
+[patch.crates-io]
+# Vendored to expose the `initserver` properties (server name/icon) that
+# tsclient-rs 0.2.7 parses but discards.
+tsclient-rs = { path = "vendor/tsclient-rs" }
