@@ -60,8 +60,13 @@
 
 ## 3.1 加密频道与加入失败
 
-- 加入频道走 `clientmove clid=<self> cid=<id> cpw=<channel_password>`（与参考实现
-  字节一致；`cpw` 只在非空时携带，值会做 TS3 转义）。密码不落盘、不写日志。
+- 加入频道走 `clientmove clid=<self> cid=<id> cpw=<base64(sha1(密码))>`。
+  **语音连接的密码字段一律是 `base64(sha1(明文))`，不是明文**：登录密码、默认频道
+  密码、`clientmove` 的 `cpw`、文件传输的 `cpw` 都是这个规则。发明文时即使密码正确，
+  服务器也回 `781 invalid channel password`（参考实现 `@honeybbq/teamspeak` 的
+  `prepareClientPassword()` 就是这么做的，它的注释原文：sending the plain text
+  instead makes the server reject correct passwords with error 781）。
+  密码不落盘、不写日志（日志里 `cpw` 一律打码）。
 - 实测错误：密码被拒返回 `error id=781 msg=invalid channel password`；权限不足返回
   `error id=2568 insufficient client permissions`。两者必须分开提示，否则非管理员会
   被“密码错误”误导着反复重输。
@@ -145,6 +150,9 @@ TS3 UID 为 20 字节 SHA-1 base64，文件名 40 个字母；TS6 为 32 字节�
    `apply_client_notification()` 处理头像变化。
 4. `Client::set_own_avatar()` + `DirectoryCache::update_client()` 改为 `pub(crate)`，
    用于上传/删除后立即刷新本地快照。
+5. `client_move()` 与 `ftinitupload` / `ftinitdownload` 的 `cpw` 现在统一过
+   `prepare_client_password()`（`base64(sha1())`）；crate 原本只对登录密码和默认频道
+   密码做了哈希，`clientmove` 漏了，表现为“密码正确也回 781”。该函数改为 `pub(crate)`。
 
 升级 `tsclient-rs` 时需逐条重新应用，并确认公开类型新增字段没有遗漏构造器。
 

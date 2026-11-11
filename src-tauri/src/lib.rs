@@ -10,7 +10,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tsclient_rs::{
     banClient, clientKick, clientMove, download_icon, fileTransferDeleteFile, identityFromString,
-    listClients, poke, send_plugin_command, sendTextMessage, uploadFileData, downloadFileData,
+    poke, send_plugin_command, sendTextMessage, uploadFileData, downloadFileData,
     Client, ClientOptions, ClientStatus, DirectorySnapshot, Event, Identity, KickReason, Logger,
     PluginCommandTarget, generateIdentity,
 };
@@ -289,9 +289,7 @@ fn join_error_text(message: impl std::fmt::Display) -> String {
         .map(|(_, tail)| tail.trim_end_matches(')').trim().to_string())
         .and_then(|value| value.parse::<i32>().ok());
     if lower.contains("invalid channel password") || matches!(id, Some(781)) {
-        return "频道密码被服务器拒绝：提示「invalid channel password」。请确认密码；\
-                若密码确定正确，说明该频道还提高了加入权限值，需要管理员放行"
-            .to_string();
+        return "频道密码不正确，请重新输入".to_string();
     }
     if matches!(id, Some(2568))
         || lower.contains("insufficient client permissions")
@@ -776,45 +774,6 @@ fn spawn_disconnect(client: Arc<Client>) {
             let _ = runtime.block_on(client.disconnect());
         }
     });
-}
-
-/// 诊断用：把服务器对 `clientlist` / `channelclientlist` 的响应原样暴露出来，
-/// 用来确认“看不到其他频道成员”是权限限制还是本地合并逻辑的问题。
-#[tauri::command]
-async fn probe_clients(state: State<'_, Arc<Bridge>>) -> Result<serde_json::Value, String> {
-    let bridge = state.inner().clone();
-    let client = get_client(&bridge)?;
-    run_proto(bridge, move |runtime| {
-        runtime.block_on(async move {
-            let mut out = serde_json::Map::new();
-            for cmd in [
-                "clientlist",
-                "clientlist -uid",
-                "clientlist -away -voice",
-                "clientlist -groups",
-                "clientlist -uid -away -voice -groups",
-            ] {
-                let value = match client.exec_command_with_response(cmd, 6000).await {
-                    Ok(rows) => serde_json::json!({
-                        "rows": rows.len(),
-                        "clients": rows
-                            .iter()
-                            .map(|row| serde_json::json!({
-                                "clid": row.get("clid"),
-                                "name": row.get("client_nickname"),
-                                "cid": row.get("cid"),
-                                "type": row.get("client_type"),
-                            }))
-                            .collect::<Vec<_>>(),
-                    }),
-                    Err(error) => serde_json::json!({ "error": error.to_string() }),
-                };
-                out.insert(cmd.to_string(), value);
-            }
-            Ok(serde_json::Value::Object(out))
-        })
-    })
-    .await
 }
 
 #[tauri::command]
@@ -1875,7 +1834,6 @@ pub fn run() {
             get_identity_string,
             export_identity,
             get_snapshot,
-            probe_clients,
             refresh_directory,
             take_deep_link,
             join_channel,

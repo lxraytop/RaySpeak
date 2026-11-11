@@ -178,7 +178,11 @@ pub fn build_ft_init_upload(
     let mut params = HashMap::new();
     params.insert("cid".to_string(), channel_id.to_string());
     params.insert("name".to_string(), target_path);
-    params.insert("cpw".to_string(), password.to_string());
+    // 与 clientmove 一致：文件命令的 `cpw` 也是 base64(sha1(密码))。
+    params.insert(
+        "cpw".to_string(),
+        crate::handshake::prepare_client_password(password),
+    );
     params.insert("size".to_string(), size.to_string());
     params.insert("clientftfid".to_string(), cftid.to_string());
     params.insert(
@@ -198,7 +202,11 @@ pub fn build_ft_init_download(channel_id: u64, path: &str, password: &str, cftid
     let mut params = HashMap::new();
     params.insert("cid".to_string(), channel_id.to_string());
     params.insert("name".to_string(), target_path);
-    params.insert("cpw".to_string(), password.to_string());
+    // 与 clientmove 一致：文件命令的 `cpw` 也是 base64(sha1(密码))。
+    params.insert(
+        "cpw".to_string(),
+        crate::handshake::prepare_client_password(password),
+    );
     params.insert("clientftfid".to_string(), cftid.to_string());
     params.insert("seekpos".to_string(), "0".to_string());
     build_command("ftinitdownload", params)

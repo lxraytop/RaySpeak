@@ -113,7 +113,9 @@ pub async fn client_move(
 ) -> Result<(), Error> {
     let mut params = vec![("clid", clid.to_string()), ("cid", channel_id.to_string())];
     if !password.is_empty() {
-        params.push(("cpw", password.to_string()));
+        // `cpw` 必须是 base64(sha1(密码))，不是明文。语音连接上用明文时，
+        // 即使密码正确服务器也会回 781 invalid channel password。
+        params.push(("cpw", crate::handshake::prepare_client_password(password)));
     }
     let cmd = build_command_ordered(
         "clientmove",

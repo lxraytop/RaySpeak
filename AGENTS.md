@@ -151,9 +151,10 @@ TeamSpeak 服务器
     `notifycliententerview`；快照循环每 ~30 秒重订阅一次做无损重同步。不要再往
     `connect_server` 里加 `servernotifyregister` / `refresh_clients`，它们是无效命令。
 16. **频道密码位来自欢迎流 `channellist`**（`channel_flag_password`），`refresh_channels`
-    同样会被 2568 拒绝，别再调用。加入用 `clientmove clid=<self> cid= cpw=`，密码被拒实测
-    是 `id=781 invalid channel password`、权限不足是 `2568`；两者提示必须分开，且别把所有
-    含 “password” 的错误都当成服务器登录密码。
+    同样会被 2568 拒绝，别再调用。加入用 `clientmove clid=<self> cid= cpw=`，
+    其中 `cpw` 必须是 `base64(sha1(明文))`——语音连接的密码字段全是这个规则，发明文时
+    密码正确也会回 `781 invalid channel password`（坑过一次，见 `prepare_client_password`）。
+    权限不足是 `2568`，两者提示必须分开，且别把所有含 “password” 的错误都当成服务器登录密码。
 
 ## 当前状态与已知缺口
 

@@ -128,7 +128,10 @@ fn build_client_ek_proof(inner: &ClientInner, public_key: &[u8], beta: &str) -> 
     base64_encode(&sig)
 }
 
-fn prepare_client_password(password: &str) -> String {
+/// TeamSpeak 的密码字段一律是 `base64(sha1(cleartext))`：登录密码、默认频道
+/// 密码、`clientmove` 的 `cpw`、文件传输的 `cpw` 都是。语音连接上发明文会被
+/// 服务器当成错误密码，回 `781 invalid channel password`。
+pub(crate) fn prepare_client_password(password: &str) -> String {
     if password.is_empty() {
         return String::new();
     }
