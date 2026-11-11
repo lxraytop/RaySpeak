@@ -72,24 +72,35 @@ function ChannelNode({
 
   const q = (query ?? '').trim().toLowerCase()
   const channelMatches = !q || stripTsTags(channel.name).toLowerCase().includes(q)
-  const members = clients.filter(
+  const occupants = clients.filter((client) => client.channelId === channel.id)
+  const members = occupants.filter(
     (client) =>
-      client.channelId === channel.id &&
-      (channelMatches || stripClientTags(client.name).toLowerCase().includes(q)),
+      channelMatches || stripClientTags(client.name).toLowerCase().includes(q),
   )
-  const hasItems = children.length > 0 || members.length > 0
+  const count = occupants.length
+  const hasItems = children.length > 0 || count > 0
   const open = expanded[channel.id] !== false
   const iconUrl = showIcons ? channelIconUrl(channel.iconId) : ''
   const active = channel.id === activeId
+  const memberNames = occupants
+    .slice(0, 8)
+    .map((client) => stripClientTags(client.name))
+    .join('、')
 
   return (
     <>
       <button
-        className={`tree-row ${active ? 'active' : ''}`}
+        className={`tree-row ${active ? 'active' : ''} ${count > 0 ? 'occupied' : ''}`}
         style={{ paddingLeft: 8 + depth * 14 }}
         data-channel-id={channel.id}
         onClick={() => onJoin(channel.id)}
-        title={channel.maxClients ? `${channel.codec} · ${channel.bitrate}kbps · 上限 ${channel.maxClients}` : channel.codec}
+        title={[
+          count > 0 ? `${count} 人在频道：${memberNames}${count > 8 ? '…' : ''}` : '当前无人在线',
+          channel.maxClients ? `上限 ${channel.maxClients} 人` : '',
+          `${channel.codec} · ${channel.bitrate}kbps`,
+        ]
+          .filter(Boolean)
+          .join(' · ')}
       >
         <span
           className={`tree-chevron ${hasItems ? '' : 'empty'} ${open ? 'open' : ''}`}
@@ -120,8 +131,11 @@ function ChannelNode({
           </span>
         )}
 
-        <span className={`tree-count ${members.length === 0 ? 'zero' : ''}`}>
-          {members.length}
+        <span
+          className={`tree-count ${count === 0 ? 'zero' : 'has'}`}
+          aria-label={`${count} 人在线`}
+        >
+          {count}
         </span>
       </button>
 

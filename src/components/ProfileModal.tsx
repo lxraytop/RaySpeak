@@ -88,6 +88,7 @@ export function ProfileModal({
   const coverStyle = {
     '--h': client.hue,
   } as CSSProperties
+  const offline = client.presence === 'offline'
 
   return (
     <Modal onClose={onClose} wide>
@@ -117,6 +118,12 @@ export function ProfileModal({
         <p className={`profile-desc ${client.description ? '' : 'empty'}`}>
           {client.description || '未填写个人简介'}
         </p>
+
+        {offline && (
+          <p className="profile-offline-note">
+            该成员当前不在服务器，这里展示的是本地缓存的资料；私聊与邀请需要对方在线。
+          </p>
+        )}
 
         <div className="profile-volume">
           <span className="profile-volume-label">
@@ -179,15 +186,15 @@ export function ProfileModal({
         {!client.self && (
           <>
             <div className="profile-actions">
-              <button className="profile-btn primary" onClick={onDm}>
+              <button className="profile-btn primary" onClick={onDm} disabled={offline}>
                 <MessageSquare size={15} strokeWidth={2} />
                 私聊
               </button>
-              <button className="profile-btn" onClick={onInvite}>
+              <button className="profile-btn" onClick={onInvite} disabled={offline}>
                 <UserPlus size={15} strokeWidth={2} />
                 邀请到我的频道
               </button>
-              <button className="profile-btn" onClick={onPoke}>
+              <button className="profile-btn" onClick={onPoke} disabled={offline}>
                 <Hand size={15} strokeWidth={2} />
                 戳一戳
               </button>

@@ -9,6 +9,7 @@
 | 协议封装 | `src/protocol.ts` | 所有 `invoke` 与 `listen` 的类型化出口 |
 | 领域映射 | `src/utils/live.ts` | Rust DTO → 前端模型、组注册、排序保持 |
 | 设置 | `src/settings.ts` | localStorage、默认值、CSS 变量与 `data-*` 投影 |
+| 本地持久化 | `src/utils/localStore.ts` | 头像缓存、联系人目录、离线判定所需数据 |
 | Tauri 桥 | `src-tauri/src/lib.rs` | 命令、事件、Bridge、快照循环、文件传输 |
 | 协议内核 | `src-tauri/vendor/tsclient-rs/` | TS3 握手、目录、消息、语音、文件传输（含补丁） |
 
@@ -111,13 +112,36 @@ Rust/前端都**不得**再按 `ChannelDto.order` 数值排序。
 
 1. 注册组图标元数据
 2. DTO → 频道/成员模型
-3. 基于 clid 计算加入/离开/换频道系统消息（受通知设置控制）
+3. 基于 clid 计算加入/离开/换频道事件（含自己），按 `notifyJoinLeave` 写入系统消息，
+   按 `joinLeaveSound` 播放进出提示音（`playJoinLeaveTone`，勿扰模式静音）
 4. 为新成员预取 `client_details`（简介、平台、版本、DB ID、频道组、头像 hash）
 5. 更新 selfUid、校正 activeId
 6. 预取频道图标、组图标
-7. 头像 effect 根据 `avatarHash` 下载并回填 `avatarUrl`
+7. 头像 effect 先查本地缓存，未命中再下载并写回缓存
+8. `rememberClients()` 把在线成员写入联系人目录，供离线展示使用
 
 `toClient()` 只有在 avatarHash 未变时才保留旧 `avatarUrl`，避免换头像后显示旧图。
+
+### 个人资料同步
+
+设置中的昵称与个人描述以 800ms 防抖自动调用 `updateSelf`，成功后立刻回写本地成员模型，
+因此资料卡、成员列表与私聊头部会同步更新。连接成功时先用 `client_details` 的简介回填设置，
+避免本地默认文案覆盖服务器已有内容（服务器是权威来源）。
+
+### 本地持久化与在线判定
+
+`utils/localStore.ts` 负责两件事：
+
+- `rayspeak.avatars.v1`：`uid → { hash, url, at }`，只保留 48 条，超出按最久未用淘汰；
+  `hash` 不匹配视为已换头像，回退到协议下载
+- `rayspeak.contacts.v1`：`uid → { name, avatarHash, description, channelId, lastSeen }`，
+  写入去抖 1.5s，60 天未出现自动过期
+
+成员是否在线完全由当前快照推导：快照里存在即在线，不在快照但本地有私聊记录
+（用联系人目录补全昵称/头像）即为离线。离线联系人保留头像与昵称，私聊输入被禁用并
+明确提示「TeamSpeak 不保存离线消息」，避免出现“发出去了但没有送达”的错觉。
+
+**注意**：这两个 store 都是本地能力，不得用于伪造服务器在线状态或历史消息。
 
 ### 消息
 
@@ -136,6 +160,21 @@ Rust/前端都**不得**再按 `ChannelDto.order` 数值排序。
   频道不存在时 `refreshDirectory` 后重试
 - OS：`tauri-plugin-deep-link` + 单实例转发；冷启动通过 `take_deep_link`
 - 邀请弹窗复制/私聊发送同一链接，不包含服务器地址
+
+### 外观投影
+
+`applySettings()` 把设置投影为 CSS 变量：`--accent`、`--radius-card`、`--panel-blur`，
+以及面板透明度系数 `--opacity-k`（= `panelOpacity / 80`）。`--panel` / `--panel-strong` /
+`--panel-soft` 在 CSS 中用 `calc(alpha * var(--opacity-k))` 计算，因此「外观 → 纯色区域
+不透明度」一个滑块即可统一调整所有纯色面板，默认 80%。
+
+### 房间头部快捷操作
+
+顺序为：布局切换 → 在线状态（在线 / 离开 / 勿扰）→ 深浅色切换 → 频道动态 → 邀请 →
+房间设置。在线状态写回 `presenceStatus` / `dnd`，由 `setAway` 同步到服务器；深浅色在
+`light` 与 `dark` 间直接切换（`system` 时按当前解析结果取反）。
+
+「共享」与「文件」入口当前暂时隐藏，对应的命令、弹窗与设置项仍保留，恢复时只需放回按钮。
 
 ### 语音
 

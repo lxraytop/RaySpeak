@@ -42,6 +42,16 @@ export function ChannelSidebar({
 
   const query = search.trim().toLowerCase()
 
+  const occupiedChannels = useMemo(
+    () =>
+      channels.filter(
+        (channel) =>
+          channel.kind === 'voice' &&
+          clients.some((client) => client.channelId === channel.id),
+      ).length,
+    [channels, clients],
+  )
+
   const visibleChannels = useMemo(() => {
     if (!query) return channels
     const keep = new Set<string>()
@@ -80,7 +90,7 @@ export function ChannelSidebar({
           <span className="server-name">{stripTsTags(serverName) || '语音服务器'}</span>
           <span className="server-sub">
             {serverMax > 0 ? `${clients.length}/${serverMax}` : clients.length} 人在线 ·{' '}
-            {channels.filter((c) => c.kind === 'voice').length} 个频道
+            {occupiedChannels} 个频道有人
           </span>
         </span>
       </div>

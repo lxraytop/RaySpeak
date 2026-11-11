@@ -16,9 +16,11 @@
   --soft: #a3adc0;
   --line: rgba(24, 47, 88, 0.08);
   --line-strong: rgba(24, 47, 88, 0.15);
-  --panel: rgba(255, 255, 255, 0.74);
-  --panel-strong: rgba(255, 255, 255, 0.94);
-  --panel-soft: rgba(255, 255, 255, 0.5);
+  /* 纯色面板透明度系数：由设置中的「纯色区域不透明度」写入，1 表示 80% 基准 */
+  --opacity-k: 1;
+  --panel: rgba(255, 255, 255, calc(0.74 * var(--opacity-k)));
+  --panel-strong: rgba(255, 255, 255, calc(0.94 * var(--opacity-k)));
+  --panel-soft: rgba(255, 255, 255, calc(0.5 * var(--opacity-k)));
   --panel-edge: #eef3fb;
   --surface: #f4f8fd;
   --hover: rgba(64, 96, 158, 0.075);
@@ -54,9 +56,9 @@
   --soft: #6c7992;
   --line: rgba(255, 255, 255, 0.075);
   --line-strong: rgba(255, 255, 255, 0.14);
-  --panel: rgba(22, 29, 44, 0.66);
-  --panel-strong: rgba(27, 35, 52, 0.95);
-  --panel-soft: rgba(255, 255, 255, 0.045);
+  --panel: rgba(22, 29, 44, calc(0.66 * var(--opacity-k)));
+  --panel-strong: rgba(27, 35, 52, calc(0.95 * var(--opacity-k)));
+  --panel-soft: rgba(255, 255, 255, calc(0.045 * var(--opacity-k)));
   --panel-edge: #141b29;
   --surface: #0f1521;
   --hover: rgba(255, 255, 255, 0.07);
@@ -4336,7 +4338,7 @@ textarea::placeholder {
 }
 
 @media (max-width: 1020px) {
-  .room-actions .ghost-btn:first-of-type {
+  .room-actions .theme-toggle {
     display: none;
   }
   .member-grid {
@@ -5899,4 +5901,318 @@ textarea::placeholder {
 .context-hint {
   color: var(--soft);
   font-size: 10px;
+}
+
+/* ---------- 房间快捷操作：在线状态 / 深浅色 ---------- */
+
+.presence-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.presence-btn {
+  padding-right: 8px;
+}
+
+.presence-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: none;
+  background: var(--soft);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--soft) 26%, transparent);
+}
+.presence-dot.online {
+  background: var(--green);
+  box-shadow: 0 0 0 2px var(--green-soft);
+}
+.presence-dot.away {
+  background: var(--amber);
+  box-shadow: 0 0 0 2px rgba(238, 162, 60, 0.18);
+}
+.presence-dot.busy {
+  background: var(--danger);
+  box-shadow: 0 0 0 2px var(--danger-soft);
+}
+.presence-dot.offline {
+  background: var(--soft);
+  box-shadow: none;
+}
+
+.presence-caret {
+  color: var(--soft);
+  transition: transform 0.16s;
+}
+.presence-caret.open {
+  transform: rotate(180deg);
+}
+
+.presence-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+}
+
+.presence-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 61;
+  width: 236px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 5px;
+  border-radius: 12px;
+  background: var(--panel-strong);
+  border: 1px solid var(--line-strong);
+  box-shadow: var(--shadow-pop);
+  backdrop-filter: blur(var(--panel-blur));
+  animation: presence-in 0.14s ease-out;
+}
+@keyframes presence-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.presence-menu button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px;
+  border-radius: 8px;
+  text-align: left;
+  transition: background 0.13s;
+}
+.presence-menu button:hover {
+  background: var(--hover);
+}
+.presence-menu button.active {
+  background: var(--accent-soft);
+}
+.presence-menu button > svg {
+  flex: none;
+  color: var(--accent-text);
+}
+.presence-copy {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.presence-copy strong {
+  font-size: 11.5px;
+  font-weight: 600;
+}
+.presence-copy em {
+  font-style: normal;
+  font-size: 9.5px;
+  line-height: 1.4;
+  color: var(--muted);
+}
+
+[data-motion="off"] .presence-menu {
+  animation: none;
+}
+
+/* ---------- 频道树：人数一眼可见 ---------- */
+
+.tree-count {
+  flex: none;
+  min-width: 20px;
+  height: 16px;
+  padding: 0 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  font-size: 10px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+  background: var(--sunken);
+  transition: color 0.14s, background 0.14s, box-shadow 0.14s;
+}
+.tree-count.has {
+  color: var(--accent-text);
+  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 1px var(--accent-line);
+}
+.tree-count.zero {
+  color: var(--soft);
+  background: transparent;
+  font-weight: 500;
+  opacity: 0.6;
+}
+.tree-row.occupied .tree-icon {
+  color: var(--accent-text);
+}
+.tree-row.occupied:hover .tree-count.has {
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+/* ---------- 联系人：在线状态 / 跨频道互动 ---------- */
+
+.dm-row-avatar,
+.dm-head-avatar,
+.dm-profile-avatar {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+}
+
+.dm-presence {
+  right: -1px;
+  bottom: -1px;
+  width: 10px;
+  height: 10px;
+  box-shadow: 0 0 0 2px var(--panel-strong);
+}
+.dm-presence.lg {
+  width: 13px;
+  height: 13px;
+  box-shadow: 0 0 0 3px var(--panel-strong);
+}
+
+.dm-row.is-offline {
+  opacity: 0.76;
+}
+.dm-row.is-offline .dm-row-preview {
+  color: var(--soft);
+}
+
+.dm-row-channel {
+  flex: none;
+  max-width: 82px;
+  height: 15px;
+  padding: 0 5px;
+  display: inline-flex;
+  align-items: center;
+  border-radius: 5px;
+  font-size: 9px;
+  font-style: normal;
+  color: var(--muted);
+  background: var(--sunken);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dm-head-state.online {
+  color: var(--green-deep);
+}
+.dm-head-state.away {
+  color: var(--amber);
+}
+.dm-head-state.busy {
+  color: var(--danger);
+}
+.dm-head-state.offline {
+  color: var(--soft);
+}
+
+.dm-action:disabled {
+  opacity: 0.38;
+  cursor: not-allowed;
+}
+.dm-action:disabled:hover {
+  color: var(--muted);
+  background: var(--sunken);
+  border-color: var(--line);
+}
+
+.dm-offline-note {
+  flex: none;
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  margin: 0 12px 8px;
+  padding: 8px 10px;
+  border-radius: 9px;
+  font-size: 10px;
+  line-height: 1.55;
+  color: var(--muted);
+  background: var(--sunken);
+  border: 1px solid var(--line);
+}
+.dm-offline-note svg {
+  flex: none;
+  margin-top: 1px;
+  color: var(--soft);
+}
+
+.dm-presence-chip {
+  font-size: 9.5px !important;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+}
+.dm-presence-chip.online {
+  color: var(--green-deep);
+}
+.dm-presence-chip.offline {
+  color: var(--soft);
+}
+.dm-profile-top > div > .dm-presence-chip::before {
+  content: none;
+}
+
+.dm-profile-actions button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.dm-profile-actions button:disabled:hover {
+  background: var(--panel-soft);
+  color: var(--ink-2);
+  border-color: var(--line);
+}
+
+.others-hint {
+  color: var(--muted);
+  font-weight: 500;
+}
+.others-hint.empty {
+  color: var(--soft);
+  opacity: 0.85;
+}
+.card-title .others-hint + .card-hint {
+  margin-left: 0;
+}
+
+.profile-offline-note {
+  margin: 8px 0 0;
+  padding: 7px 10px;
+  border-radius: 8px;
+  font-size: 10px;
+  line-height: 1.55;
+  color: var(--muted);
+  background: var(--sunken);
+  border: 1px solid var(--line);
+}
+
+.profile-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.profile-btn:disabled:hover {
+  background: var(--panel-soft);
+  color: var(--ink-2);
+  border-color: var(--line);
+}
+
+/* 卡片标题不换行；窄窗口隐藏次要提示，保证「房间成员 + 人数」始终单行 */
+.card-title {
+  white-space: nowrap;
+}
+@media (max-width: 1160px) {
+  .card-title .others-hint,
+  .card-title .card-hint {
+    display: none;
+  }
 }

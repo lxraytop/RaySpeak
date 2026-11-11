@@ -41,6 +41,7 @@ import {
   showDesktopNotification,
 } from '../notify'
 import { stripClientTags } from '../utils/tsText'
+import { clearLocalStore } from '../utils/localStore'
 import {
   HotkeyInput,
   Segmented,
@@ -482,7 +483,11 @@ export function SettingsPage({
                     onChange={(value) => onChange({ nickname: value })}
                   />
                 </SettingRow>
-                <SettingRow title="个人描述" desc="显示在资料卡片的简介区域" vertical>
+                <SettingRow
+                  title="个人描述"
+                  desc="显示在资料卡片的简介区域，连接后会自动同步到服务器，无需手动保存"
+                  vertical
+                >
                   <textarea
                     className="text-area"
                     value={settings.description}
@@ -491,6 +496,10 @@ export function SettingsPage({
                     onChange={(event) => onChange({ description: event.target.value })}
                   />
                 </SettingRow>
+                <p className="set-note">
+                  昵称与个人描述会在停止输入约 1 秒后自动同步到服务器，其他成员通过资料卡即可看到；
+                  未连接时修改只保存在本机。
+                </p>
               </SetCard>
 
               <SetCard title="身份与安全" desc="TeamSpeak 使用身份密钥对识别用户，等级越高越难被冒充">
@@ -994,6 +1003,19 @@ export function SettingsPage({
                     onChange={(value) => onChange({ blur: value })}
                   />
                 </SettingRow>
+                <SettingRow
+                  title="纯色区域不透明度"
+                  desc="统一调整卡片、侧栏、面板等纯色区域，默认 80%；100% 完全不透明"
+                >
+                  <Slider
+                    value={settings.panelOpacity}
+                    min={30}
+                    max={100}
+                    step={5}
+                    suffix="%"
+                    onChange={(value) => onChange({ panelOpacity: value })}
+                  />
+                </SettingRow>
                 <SettingRow title="界面动画" desc="关闭后取消过渡与说话光效">
                   <Switch
                     checked={settings.animations}
@@ -1189,11 +1211,20 @@ export function SettingsPage({
                 </div>
               </SetCard>
 
-              <SetCard title="频道提醒" desc="成员进出频道时写入本地聊天记录">
+              <SetCard title="频道提醒" desc="成员进出频道时写入本地聊天记录，并可播放提示音">
                 <SettingRow title="成员进出提醒" desc="在消息区显示加入/离开/移动记录">
                   <Switch
                     checked={settings.notifyJoinLeave}
                     onChange={(value) => onChange({ notifyJoinLeave: value })}
+                  />
+                </SettingRow>
+                <SettingRow
+                  title="进出提示音"
+                  desc="有人（包括你自己）进出频道时播放短提示音，勿扰模式下自动静音"
+                >
+                  <Switch
+                    checked={settings.joinLeaveSound}
+                    onChange={(value) => onChange({ joinLeaveSound: value })}
                   />
                 </SettingRow>
               </SetCard>
@@ -1347,7 +1378,7 @@ export function SettingsPage({
 
               <SetCard
                 title="协议能力对照"
-                desc="基于 tsclient-rs 当前实现；私聊、文件、频道管理、屏幕共享界面已补齐"
+                desc="基于 tsclient-rs 当前实现；共享与文件面板已具备，但入口暂时隐藏"
               >
                 <div className="protocol-list">
                   {protocolRows.map(([name, detail, status]) => (
@@ -1380,18 +1411,24 @@ export function SettingsPage({
                   <button
                     className="small-btn ghost"
                     onClick={() => {
+                      let removed = 0
                       try {
                         const keys = Object.keys(localStorage).filter(
                           (key) =>
                             key.startsWith('rayspeak.volumes') ||
                             key.startsWith('rayspeak.nickname') ||
-                            key.startsWith('rayspeak.dm.'),
+                            key.startsWith('rayspeak.dm.') ||
+                            key.startsWith('rayspeak.avatars') ||
+                            key.startsWith('rayspeak.contacts'),
                         )
                         keys.forEach((key) => localStorage.removeItem(key))
-                        onToast(`已清理 ${keys.length} 项本地缓存`)
+                        removed = keys.length
                       } catch {
                         onToast('本地存储不可用')
+                        return
                       }
+                      clearLocalStore()
+                      onToast(`已清理 ${removed} 项本地缓存（含头像与联系人目录）`)
                     }}
                   >
                     <Trash2 size={13} strokeWidth={2} />
@@ -1431,7 +1468,7 @@ export function SettingsPage({
                   <div>
                     <span className="status-dot done" />
                     <strong>UI 与交互</strong>
-                    <em>私聊、文件、频道管理、资料卡与屏幕共享预览已完成</em>
+                    <em>私聊、频道管理、资料卡与通知已完成（共享与文件入口暂缓展示）</em>
                   </div>
                   <div>
                     <span className="status-dot done" />
@@ -1477,7 +1514,7 @@ export function SettingsPage({
 
           <footer className="settings-footer">
             <Columns2 size={13} strokeWidth={2} />
-            <span>提示：在房间头部也可以随时切换「成员卡片 / 网格式」布局</span>
+            <span>提示：房间头部可随时切换布局、在线状态与深/浅色模式</span>
             <LayoutGrid size={13} strokeWidth={2} />
           </footer>
         </div>

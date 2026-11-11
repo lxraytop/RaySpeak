@@ -108,6 +108,8 @@ export function StatusIcons({
 }
 
 export function clientStateText(client: Client) {
+  if (client.presence === 'offline') return '离线'
+  if (client.presence === 'busy') return '勿扰'
   if (client.talking) return '正在说话'
   if (client.outputMuted) return '扬声器关闭'
   if (client.micMuted) return '已静音'

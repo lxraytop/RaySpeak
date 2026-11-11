@@ -14,6 +14,7 @@ export interface Settings {
   density: Density
   radius: number
   blur: number
+  panelOpacity: number
   background: BackgroundId
   backgroundImage: string
   backgroundDim: number
@@ -59,6 +60,7 @@ export interface Settings {
   presenceStatus: 'online' | 'away'
   awayMessage: string
   notifyJoinLeave: boolean
+  joinLeaveSound: boolean
   blocked: string[]
   fileTransfer: boolean
   autoReconnect: boolean
@@ -123,10 +125,11 @@ export const defaultSettings: Settings = {
   accent: '#3d6bf5',
   density: 'cozy',
   radius: 14,
-  blur: 18,
+  blur: 12,
+  panelOpacity: 80,
   background: 'mist',
   backgroundImage: '',
-  backgroundDim: 40,
+  backgroundDim: 30,
   layout: 'cards',
   cardStyle: 'raised',
   animations: true,
@@ -138,10 +141,10 @@ export const defaultSettings: Settings = {
   showChannelCounts: true,
   inputDevice: '',
   outputDevice: '',
-  inputVolume: 78,
-  outputVolume: 82,
+  inputVolume: 100,
+  outputVolume: 100,
   inputMode: 'vad',
-  vadThreshold: -38,
+  vadThreshold: -45,
   echoCancel: true,
   noiseSuppress: true,
   autoGain: false,
@@ -149,7 +152,7 @@ export const defaultSettings: Settings = {
   bitrate: 64,
   frameSize: 20,
   stereo: false,
-  jitterBuffer: 60,
+  jitterBuffer: 80,
   latencyMode: 'balanced',
   hotkeys: {
     ptt: 'V',
@@ -169,20 +172,54 @@ export const defaultSettings: Settings = {
   presenceStatus: 'online',
   awayMessage: '暂时离开',
   notifyJoinLeave: true,
+  joinLeaveSound: true,
   blocked: [],
   fileTransfer: true,
   autoReconnect: true,
-  timeout: 15,
+  timeout: 20,
   demoEvents: false,
 }
 
 const STORAGE_KEY = 'rayspeak.settings.v2'
+const DEFAULTS_KEY = 'rayspeak.settings.defaults'
+
+/**
+ * 旧版本里明显不合理的默认值。升级时只把「仍然等于旧默认值」的字段换成新默认值，
+ * 用户手动改过的配置保持不变。
+ */
+const LEGACY_DEFAULTS: Partial<Record<keyof Settings, unknown>> = {
+  inputVolume: 78,
+  outputVolume: 82,
+  vadThreshold: -38,
+  jitterBuffer: 60,
+  timeout: 15,
+  blur: 18,
+  backgroundDim: 40,
+}
+const DEFAULTS_VERSION = '2'
+
+function migrateDefaults(parsed: Partial<Settings>): Partial<Settings> {
+  try {
+    if (localStorage.getItem(DEFAULTS_KEY) === DEFAULTS_VERSION) return parsed
+    localStorage.setItem(DEFAULTS_KEY, DEFAULTS_VERSION)
+  } catch {
+    return parsed
+  }
+  const next: Partial<Settings> = { ...parsed }
+  for (const [key, legacy] of Object.entries(LEGACY_DEFAULTS)) {
+    const field = key as keyof Settings
+    if (next[field] === legacy) {
+      ;(next as Record<string, unknown>)[field] = defaultSettings[field]
+    }
+  }
+  return next
+}
 
 export function loadSettings(): Settings {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
     if (!raw) return { ...defaultSettings }
-    const parsed = JSON.parse(raw) as Partial<Settings>
+    const parsed = migrateDefaults(JSON.parse(raw) as Partial<Settings>)
     const legacyDevice = (value: unknown) =>
       typeof value === 'string' && value.includes('(') && value.includes(')') ? '' : value
     return {
@@ -242,6 +279,9 @@ export function applySettings(settings: Settings) {
   root.style.setProperty('--accent', settings.accent)
   root.style.setProperty('--radius-card', `${settings.radius}px`)
   root.style.setProperty('--panel-blur', `${settings.blur}px`)
+  // 纯色面板不透明度：100% 完全不透明，默认 80% 保持轻微透出背景
+  const panelOpacity = Math.min(100, Math.max(30, settings.panelOpacity ?? 80))
+  root.style.setProperty('--opacity-k', (panelOpacity / 80).toFixed(3))
 
   const preset = backgroundPresets[settings.background] ?? backgroundPresets.mist
   const image = safeImage(settings.backgroundImage)

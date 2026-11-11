@@ -2,9 +2,10 @@ import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as R
 import {
   ArrowRightLeft,
   Ban,
+  Check,
+  ChevronDown,
   Columns2,
   Copy,
-  FolderOpen,
   Headphones,
   ImagePlus,
   Info,
@@ -15,9 +16,11 @@ import {
   MessageSquare,
   Mic,
   MicOff,
+  Moon,
   MonitorUp,
   RefreshCw,
   SlidersHorizontal,
+  Sun,
   Trash2,
   UserMinus,
   UserRound,
@@ -40,12 +43,14 @@ import type {
   DmMessage,
   FileItem,
   LayoutId,
+  Presence,
   SystemLine,
   VoiceChannel,
 } from './types'
 import {
   applySettings,
   defaultSettings,
+  isDark,
   loadSettings,
   saveSettings,
   type Settings,
@@ -67,8 +72,15 @@ import {
   type VoiceEvent,
 } from './protocol'
 import { registerLiveGroups, toChannels, toClients, toFiles } from './utils/live'
+import {
+  cacheAvatar,
+  dropCachedAvatar,
+  getCachedAvatar,
+  getContact,
+  rememberClients,
+} from './utils/localStore'
 import { useVoice } from './useVoice'
-import { playNotifyTone, showDesktopNotification } from './notify'
+import { playJoinLeaveTone, playNotifyTone, showDesktopNotification } from './notify'
 import { LoginScreen } from './components/LoginScreen'
 import { ContextMenu, type ContextItem } from './components/ContextMenu'
 import { TitleBar } from './components/TitleBar'
@@ -139,10 +151,23 @@ const initialModal =
 
 type VolumeState = Record<string, { volume: number; localMuted: boolean }>
 type ModalState = 'invite' | 'queue' | 'create' | 'files' | 'screen' | 'room' | null
+type SelfPresence = 'online' | 'away' | 'busy'
 type ConfirmState =
   | { kind: 'kick' | 'ban'; client: Client }
   | { kind: 'delete-channel'; channel: VoiceChannel }
   | null
+
+const presenceOptions: Array<{ id: SelfPresence; label: string; hint: string }> = [
+  { id: 'online', label: '在线', hint: '正常接收语音、私聊与提醒' },
+  { id: 'away', label: '离开', hint: '状态同步为离开，仍会收到提醒' },
+  { id: 'busy', label: '勿扰', hint: '静音所有提醒，状态显示为勿扰' },
+]
+
+const presenceLabel: Record<SelfPresence, string> = {
+  online: '在线',
+  away: '离开',
+  busy: '勿扰',
+}
 
 const EMPTY_CHANNEL: VoiceChannel = {
   id: '',
@@ -173,6 +198,16 @@ function powerOf(client: Client) {
 function clock() {
   const now = new Date()
   return `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`
+}
+
+function seenLabel(timestamp: number) {
+  const delta = Date.now() - timestamp
+  if (delta < 60_000) return '刚刚在线'
+  if (delta < 3_600_000) return `${Math.floor(delta / 60_000)} 分钟前在线`
+  const date = new Date(timestamp)
+  const time = `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
+  const sameDay = date.toDateString() === new Date().toDateString()
+  return sameDay ? `今天 ${time} 在线` : `${date.getMonth() + 1}-${date.getDate()} ${time} 在线`
 }
 
 export default function App() {
@@ -234,6 +269,7 @@ export default function App() {
   const [sharing, setSharing] = useState(false)
   const [shareMock, setShareMock] = useState(false)
   const [shareStream, setShareStream] = useState<MediaStream | null>(null)
+  const [presenceMenu, setPresenceMenu] = useState(false)
   const [toast, setToast] = useState<string | null>(null)
   const [contextMenu, setContextMenu] = useState<{
     x: number
@@ -285,6 +321,7 @@ export default function App() {
     Array<{ kind: 'channel' | 'dm'; target: string; text: string; at: number; id: string }>
   >([])
   const savedVolumesRef = useRef<VolumeState>(loadVolumes())
+  const joinToneAt = useRef(0)
   const [deviceLabels, setDeviceLabels] = useState<Record<string, string>>({})
 
   useEffect(() => {
@@ -391,11 +428,25 @@ export default function App() {
       const hash = client.avatarHash
       if (!uid || !hash || client.avatarUrl) continue
       const key = `${uid}:${hash}`
+      const cached = getCachedAvatar(uid, hash)
+      if (cached) {
+        if (avatarRequests.current.has(key)) continue
+        avatarRequests.current.add(key)
+        setClients((prev) =>
+          prev.map((item) =>
+            item.id === client.id && item.avatarHash === hash
+              ? { ...item, avatarUrl: cached }
+              : item,
+          ),
+        )
+        continue
+      }
       if (avatarRequests.current.has(key)) continue
       avatarRequests.current.add(key)
       protocol
         .fetchClientAvatar(uid, hash)
         .then((url) => {
+          cacheAvatar(uid, hash, url)
           setClients((prev) =>
             prev.map((item) =>
               item.id === client.id && item.avatarHash === hash
@@ -467,6 +518,9 @@ export default function App() {
           client.id === mover.id ? { ...client, channelId: dest.id, connectedAt: '刚刚' } : client,
         ),
       )
+      if (settingsRef.current.joinLeaveSound && !settingsRef.current.dnd) {
+        playJoinLeaveTone('join')
+      }
     }, 7000)
     return () => window.clearInterval(timer)
   }, [settings.demoEvents, channels])
@@ -508,11 +562,8 @@ export default function App() {
   const applySnapshot = useCallback((snapshot: SnapshotDto, focusSelf = false) => {
     registerLiveGroups(snapshot.groups)
     const nextChannels = toChannels(snapshot)
-    if (
-      !focusSelf &&
-      clientsRef.current.length > 0 &&
-      settingsRef.current.notifyJoinLeave
-    ) {
+    const config = settingsRef.current
+    if (!focusSelf && clientsRef.current.length > 0) {
       const previous = new Map(
         clientsRef.current
           .filter((client) => typeof client.clid === 'number')
@@ -522,23 +573,33 @@ export default function App() {
       const channelName = (id: string) =>
         stripTsTags(nextChannels.find((channel) => channel.id === id)?.name ?? '') ||
         '频道'
+      let joins = 0
+      let leaves = 0
       const lines: string[] = []
       for (const client of snapshot.clients) {
-        if (client.isSelf) continue
-        const name = stripTsTags(client.name) || '成员'
+        const name = client.isSelf ? '你' : stripTsTags(client.name) || '成员'
         const old = previous.get(client.clid)
-        if (!old) lines.push(`${name} 加入了服务器`)
-        else if (old.channelId !== client.channelId) {
-          lines.push(`${name} 加入了「${channelName(client.channelId)}」`)
+        if (!old) {
+          if (client.isSelf) continue
+          joins += 1
+          lines.push(`${name} 加入了服务器`)
+        } else if (old.channelId !== client.channelId) {
+          joins += 1
+          lines.push(
+            client.isSelf
+              ? `你加入了「${channelName(client.channelId)}」`
+              : `${name} 加入了「${channelName(client.channelId)}」`,
+          )
         }
       }
       for (const old of clientsRef.current) {
-        if (old.self || typeof old.clid !== 'number') continue
+        if (typeof old.clid !== 'number') continue
         if (!incoming.has(old.clid)) {
-          lines.push(`${stripTsTags(old.name) || '成员'} 离开了服务器`)
+          leaves += 1
+          lines.push(old.self ? '你已离开服务器' : `${stripTsTags(old.name) || '成员'} 离开了服务器`)
         }
       }
-      if (lines.length > 0) {
+      if (lines.length > 0 && config.notifyJoinLeave) {
         setSystem((prev) => [
           ...prev,
           ...lines.map((text) => ({
@@ -548,9 +609,19 @@ export default function App() {
           })),
         ])
       }
+      if (config.joinLeaveSound && !config.dnd && joins + leaves > 0) {
+        // 大频道连续进出时最多每 900ms 响一次，避免提示音连成一片
+        const now = Date.now()
+        if (now - joinToneAt.current > 900) {
+          joinToneAt.current = now
+          playJoinLeaveTone(leaves > joins ? 'leave' : 'join')
+        }
+      }
     }
     setChannels(nextChannels)
-    setClients((prev) => toClients(snapshot, prev, savedVolumesRef.current))
+    const nextClients = toClients(snapshot, clientsRef.current, savedVolumesRef.current)
+    setClients(nextClients)
+    rememberClients(nextClients)
     const present = new Set(snapshot.clients.map((client) => client.clid))
     for (const clid of Array.from(detailsRequested.current)) {
       if (!present.has(clid)) {
@@ -703,9 +774,8 @@ export default function App() {
               .then((payload) => {
                 clientDetailsRef.current[self.clid] = payload
                 applyClientDetails(self.clid, payload)
-                if (payload.description) {
-                  setSettings((prev) => ({ ...prev, description: payload.description ?? '' }))
-                }
+                // 服务器上的个人简介是权威值：连上后即回填，避免本地默认文案覆盖服务器内容
+                setSettings((prev) => ({ ...prev, description: payload.description ?? '' }))
               })
               .catch(() => {})
           }
@@ -992,34 +1062,47 @@ export default function App() {
   const selfId = selfRaw?.id ?? 'me'
 
   const viewClients = useMemo(() => {
+    const hydrate = (client: Client): Client => {
+      const uid = client.uid || client.id
+      return {
+        ...client,
+        avatarUrl: client.avatarUrl ?? getCachedAvatar(uid, client.avatarHash),
+      }
+    }
+    const selfPresence: Presence = settings.dnd ? 'busy' : settings.presenceStatus
     const base = clients.map((client) =>
       client.self
-        ? {
+        ? hydrate({
             ...client,
-            name: demoMode && settings.nickname ? settings.nickname : client.name,
-            description:
-              demoMode && settings.description ? settings.description : client.description,
+            name: settings.nickname || client.name,
+            description: settings.description ?? client.description,
             micMuted: muted || client.micMuted,
             outputMuted: deafened || client.outputMuted,
-            presence: settings.showPresence ? client.presence : ('offline' as const),
-          }
-        : client,
+            presence: settings.showPresence ? selfPresence : 'offline',
+          })
+        : hydrate(client),
     )
     if (demoMode) return base
     const known = new Set(base.map((client) => client.id))
+    // 离线联系人来自本地私聊记录 + 联系人目录：头像与昵称都已持久化，
+    // 因此重启后仍能看到是谁在什么时候聊过，并据此判断当前是否在线。
     const offline = new Map<string, Client>()
     for (const message of dmMessages) {
       if (message.self || message.system || !message.contactId) continue
-      if (known.has(message.contactId) || offline.has(message.contactId)) continue
-      const name = message.author || '离线用户'
+      const id = message.contactId
+      if (known.has(id) || offline.has(id)) continue
+      const record = getContact(id)
+      const name = record?.name || message.author || '离线用户'
       let hue = 0
-      for (const char of message.contactId) hue = (hue * 31 + char.charCodeAt(0)) % 360
-      offline.set(message.contactId, {
-        id: message.contactId,
+      for (const char of id) hue = (hue * 31 + char.charCodeAt(0)) % 360
+      offline.set(id, {
+        id,
         name,
-        letter: name.slice(0, 1),
+        letter: stripTsTags(name).slice(0, 1) || '?',
         hue,
-        description: '离线 · 历史会话',
+        description: record?.description || '离线 · 历史会话',
+        avatarHash: record?.avatarHash,
+        avatarUrl: getCachedAvatar(id, record?.avatarHash),
         channelId: '',
         serverGroups: [],
         channelGroups: [],
@@ -1030,8 +1113,12 @@ export default function App() {
         localMuted: false,
         presence: 'offline',
         device: 'desktop',
-        connectedAt: '历史会话',
-        uid: message.contactId,
+        awayMessage: undefined,
+        connectedAt: record?.lastSeen ? seenLabel(record.lastSeen) : '历史会话',
+        platform: undefined,
+        version: undefined,
+        uid: id,
+        dbId: undefined,
       })
     }
     return [...base, ...offline.values()]
@@ -1042,6 +1129,8 @@ export default function App() {
     settings.nickname,
     settings.description,
     settings.showPresence,
+    settings.dnd,
+    settings.presenceStatus,
     muted,
     deafened,
   ])
@@ -1061,6 +1150,16 @@ export default function App() {
     return list.sort(
       (a, b) => Number(Boolean(b.self)) - Number(Boolean(a.self)) || powerOf(b) - powerOf(a),
     )
+  }, [visibleClients, activeChannel.id])
+
+  const otherStats = useMemo(() => {
+    const others = visibleClients.filter(
+      (client) => client.channelId && client.channelId !== activeChannel.id,
+    )
+    return {
+      people: others.length,
+      channels: new Set(others.map((client) => client.channelId)).size,
+    }
   }, [visibleClients, activeChannel.id])
 
   const selfClient = viewClients.find((client) => client.self)
@@ -1088,11 +1187,18 @@ export default function App() {
 
   const channelMessages = useMemo(
     () =>
-      messages.filter(
-        (message) =>
-          message.channelId === activeId && !settings.blocked.includes(message.clientId),
-      ),
-    [messages, activeId, settings.blocked],
+      messages
+        .filter(
+          (message) =>
+            message.channelId === activeId && !settings.blocked.includes(message.clientId),
+        )
+        .map((message) => {
+          if (message.avatarUrl) return message
+          // 历史消息只存了 UID：渲染时按当前成员表补全头像，换头像或缓存命中都能生效
+          const owner = viewClients.find((client) => client.id === message.clientId)
+          return owner?.avatarUrl ? { ...message, avatarUrl: owner.avatarUrl } : message
+        }),
+    [messages, activeId, settings.blocked, viewClients],
   )
 
   const channelSystem = useMemo(
@@ -1280,6 +1386,9 @@ export default function App() {
       prev.map((client) => (client.self ? { ...client, channelId: channel.id } : client)),
     )
     setActiveId(channel.id)
+    if (settingsRef.current.joinLeaveSound && !settingsRef.current.dnd) {
+      playJoinLeaveTone('join')
+    }
     notify(`已加入「${stripTsTags(channel.name)}」`)
   }
 
@@ -1506,6 +1615,7 @@ export default function App() {
         return
       }
       const hash = await protocol.uploadAvatar(dataUrl.split(',')[1] ?? '')
+      cacheAvatar(selfUidRef.current, hash, dataUrl)
       setClients((prev) =>
         prev.map((client) =>
           client.self ? { ...client, avatarHash: hash, avatarUrl: dataUrl } : client,
@@ -1529,6 +1639,7 @@ export default function App() {
     }
     try {
       await protocol.deleteAvatar()
+      dropCachedAvatar(selfUidRef.current)
       setClients((prev) =>
         prev.map((client) =>
           client.self ? { ...client, avatarHash: undefined, avatarUrl: undefined } : client,
@@ -1849,13 +1960,33 @@ export default function App() {
     if (demoMode || !connected) return
     const self = clients.find((client) => client.self)
     if (!self) return
-    const wanted = settings.nickname.trim()
-    if (!wanted || wanted === stripTsTags(self.name)) return
+    const wantedName = settings.nickname.trim()
+    const wantedDesc = settings.description.trim()
+    const currentName = stripTsTags(self.name).trim()
+    const currentDesc = (self.description ?? '').trim()
+    const nameChanged = Boolean(wantedName) && wantedName !== currentName
+    const descChanged = wantedDesc !== currentDesc
+    if (!nameChanged && !descChanged) return
     const timer = window.setTimeout(() => {
-      protocol.updateSelf(wanted).catch(() => {})
-    }, 700)
+      protocol
+        .updateSelf(nameChanged ? wantedName : null, descChanged ? wantedDesc : null)
+        .then(() => {
+          setClients((prev) =>
+            prev.map((client) =>
+              client.self
+                ? {
+                    ...client,
+                    name: nameChanged ? wantedName : client.name,
+                    description: descChanged ? wantedDesc : client.description,
+                  }
+                : client,
+            ),
+          )
+        })
+        .catch(() => {})
+    }, 800)
     return () => window.clearTimeout(timer)
-  }, [demoMode, connected, clients, settings.nickname])
+  }, [demoMode, connected, clients, settings.nickname, settings.description])
 
   const markRemoteTalking = useCallback((clid: number, talking: boolean) => {
     setClients((prev) => {
@@ -2291,8 +2422,13 @@ export default function App() {
 
   const userName = settings.nickname || '我'
   const currentCodec = `${activeChannel.codec} · ${activeChannel.bitrate} kbps`
-  const dmChannelName =
-    channels.find((channel) => channel.id === activeDmClient?.channelId)?.name ?? '未知频道'
+  const dark = isDark(settings.theme)
+  const selfPresence: SelfPresence = settings.dnd ? 'busy' : settings.presenceStatus
+  const setPresence = (next: SelfPresence) => {
+    if (next === 'busy') updateSettings({ dnd: true })
+    else updateSettings({ dnd: false, presenceStatus: next })
+  }
+  const toggleTheme = () => updateSettings({ theme: dark ? 'light' : 'dark' })
 
   if (!demoMode && auth !== 'ready') {
     return (
@@ -2344,7 +2480,7 @@ export default function App() {
             activeId={activeDmId}
             blocked={settings.blocked}
             unread={unread}
-            channelName={dmChannelName}
+            channels={channels}
             onSelect={selectDm}
             onSend={sendDm}
             onOpenProfile={openProfile}
@@ -2352,6 +2488,11 @@ export default function App() {
             onPoke={pokeClient}
             onBlock={blockClient}
             onUnblock={unblockClient}
+            onJoinChannel={(client) => {
+              if (!client.channelId) return
+              setPage('voice')
+              joinChannel(client.channelId)
+            }}
             onJumpVoice={() => setPage('voice')}
             onToast={notify}
           />
@@ -2431,14 +2572,65 @@ export default function App() {
                       <LayoutGrid size={15} strokeWidth={2.1} />
                     </button>
                   </div>
-                  <button className="ghost-btn" onClick={() => setModal('screen')}>
-                    <MonitorUp size={14} strokeWidth={2} />
-                    共享
+
+                  <div className="presence-wrap">
+                    <button
+                      className={`ghost-btn presence-btn ${selfPresence}`}
+                      title="调整我的在线状态"
+                      aria-haspopup="menu"
+                      aria-expanded={presenceMenu}
+                      onClick={() => setPresenceMenu((value) => !value)}
+                    >
+                      <span className={`presence-dot ${selfPresence}`} />
+                      {presenceLabel[selfPresence]}
+                      <ChevronDown
+                        size={12}
+                        strokeWidth={2.4}
+                        className={`presence-caret ${presenceMenu ? 'open' : ''}`}
+                      />
+                    </button>
+                    {presenceMenu && (
+                      <>
+                        <div
+                          className="presence-scrim"
+                          onClick={() => setPresenceMenu(false)}
+                        />
+                        <div className="presence-menu" role="menu">
+                          {presenceOptions.map((option) => (
+                            <button
+                              key={option.id}
+                              role="menuitemradio"
+                              aria-checked={selfPresence === option.id}
+                              className={selfPresence === option.id ? 'active' : ''}
+                              onClick={() => {
+                                setPresence(option.id)
+                                setPresenceMenu(false)
+                              }}
+                            >
+                              <span className={`presence-dot ${option.id}`} />
+                              <span className="presence-copy">
+                                <strong>{option.label}</strong>
+                                <em>{option.hint}</em>
+                              </span>
+                              {selfPresence === option.id && (
+                                <Check size={13} strokeWidth={2.6} />
+                              )}
+                            </button>
+                          ))}
+                        </div>
+                      </>
+                    )}
+                  </div>
+
+                  <button
+                    className="ghost-btn theme-toggle"
+                    title={dark ? '切换到浅色模式' : '切换到深色模式'}
+                    onClick={toggleTheme}
+                  >
+                    {dark ? <Sun size={14} strokeWidth={2} /> : <Moon size={14} strokeWidth={2} />}
+                    {dark ? '浅色' : '深色'}
                   </button>
-                  <button className="ghost-btn" onClick={() => setModal('files')}>
-                    <FolderOpen size={14} strokeWidth={2} />
-                    文件
-                  </button>
+
                   <button className="ghost-btn" onClick={() => setModal('queue')}>
                     <UserRoundPlus size={14} strokeWidth={2} />
                     频道动态
@@ -2458,6 +2650,7 @@ export default function App() {
                     <MemberPanel
                       members={members}
                       limit={activeChannel.maxClients ?? 0}
+                      others={otherStats}
                       onOpenProfile={openProfile}
                       onVolume={changeVolume}
                       onToggleLocalMute={toggleLocalMute}
@@ -2479,6 +2672,7 @@ export default function App() {
                     <MemberGrid
                       members={members}
                       limit={activeChannel.maxClients ?? 0}
+                      others={otherStats}
                       onOpenProfile={openProfile}
                       onVolume={changeVolume}
                       onToggleLocalMute={toggleLocalMute}
@@ -2674,7 +2868,10 @@ export default function App() {
         <ProfileModal
           client={profileClient}
           channelName={
-            channels.find((channel) => channel.id === profileClient.channelId)?.name ?? '未知频道'
+            profileClient.presence === 'offline'
+              ? '不在服务器'
+              : channels.find((channel) => channel.id === profileClient.channelId)?.name ??
+                '未知频道'
           }
           canModerate={canModerate}
           blocked={settings.blocked.includes(profileClient.id)}

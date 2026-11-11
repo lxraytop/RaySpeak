@@ -5,6 +5,7 @@ import { MemberCard } from './MemberCard'
 interface Props {
   members: Client[]
   limit: number
+  others?: { people: number; channels: number }
   onOpenProfile: (id: string) => void
   onVolume: (id: string, volume: number) => void
   onToggleLocalMute: (id: string) => void
@@ -12,9 +13,26 @@ interface Props {
   onRefresh: () => void
 }
 
+function OthersHint({ others }: { others?: { people: number; channels: number } }) {
+  if (!others) return null
+  return (
+    <span
+      className={`card-hint others-hint ${others.people === 0 ? 'empty' : ''}`}
+      title={
+        others.people === 0
+          ? '其他频道暂时没有成员'
+          : `分布在 ${others.channels} 个频道，可在左侧频道列表快速查看`
+      }
+    >
+      {others.people === 0 ? '其他频道无人' : `其他频道 ${others.people} 人`}
+    </span>
+  )
+}
+
 export function MemberGrid({
   members,
   limit,
+  others,
   onOpenProfile,
   onVolume,
   onToggleLocalMute,
@@ -28,6 +46,7 @@ export function MemberGrid({
           <Users size={15} strokeWidth={1.9} className="card-title-icon" />
           房间成员
           <span className="count-badge">{members.length}</span>
+          <OthersHint others={others} />
           <span className="card-hint">
             {limit > 0 ? `上限 ${limit} 人` : '无人数上限'}
           </span>
@@ -69,6 +88,7 @@ export function MemberGrid({
 export function MemberPanel({
   members,
   limit,
+  others,
   onOpenProfile,
   onVolume,
   onToggleLocalMute,
@@ -82,6 +102,7 @@ export function MemberPanel({
           <Users size={15} strokeWidth={1.9} className="card-title-icon" />
           房间成员
           <span className="count-badge">{members.length}</span>
+          <OthersHint others={others} />
         </div>
         <div className="card-tools">
           <button className="icon-btn" title="频道动态" onClick={onQueue}>

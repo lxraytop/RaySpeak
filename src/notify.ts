@@ -50,6 +50,39 @@ export function playNotifyTone(name: string) {
   }
 }
 
+const joinNotes: Array<[number, number, number]> = [
+  [620, 0, 0.1],
+  [880, 0.09, 0.15],
+]
+
+const leaveNotes: Array<[number, number, number]> = [
+  [700, 0, 0.1],
+  [470, 0.09, 0.16],
+]
+
+/**
+ * 成员进出频道提示音。音量明显低于消息提示音，避免大频道频繁进出时刺耳。
+ */
+export function playJoinLeaveTone(kind: 'join' | 'leave') {
+  const context = audioContext()
+  if (!context) return
+  const notes = kind === 'join' ? joinNotes : leaveNotes
+  const start = context.currentTime + 0.01
+  for (const [frequency, offset, duration] of notes) {
+    const oscillator = context.createOscillator()
+    const gain = context.createGain()
+    oscillator.type = 'sine'
+    oscillator.frequency.value = frequency
+    gain.gain.setValueAtTime(0.0001, start + offset)
+    gain.gain.exponentialRampToValueAtTime(0.07, start + offset + 0.02)
+    gain.gain.exponentialRampToValueAtTime(0.0001, start + offset + duration)
+    oscillator.connect(gain)
+    gain.connect(context.destination)
+    oscillator.start(start + offset)
+    oscillator.stop(start + offset + duration + 0.02)
+  }
+}
+
 export async function ensureNotifyPermission(): Promise<boolean> {
   try {
     if (isTauri) {

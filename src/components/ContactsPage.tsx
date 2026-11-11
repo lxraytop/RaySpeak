@@ -4,6 +4,7 @@ import {
   CircleUserRound,
   Copy,
   Hand,
+  LogIn,
   MessageSquare,
   Radio,
   Search,
@@ -12,9 +13,10 @@ import {
   ShieldOff,
   Smile,
   UserPlus,
+  WifiOff,
   X,
 } from 'lucide-react'
-import type { Client, DmMessage } from '../types'
+import type { Client, DmMessage, VoiceChannel } from '../types'
 import { emojiList, groupMap } from '../data/mock'
 import { stripClientTags, stripTsTags } from '../utils/tsText'
 import { Avatar } from './Avatar'
@@ -28,7 +30,7 @@ interface Props {
   activeId: string | null
   blocked: string[]
   unread: Record<string, number>
-  channelName: string
+  channels: VoiceChannel[]
   onSelect: (id: string) => void
   onSend: (text: string) => void
   onOpenProfile: (id: string) => void
@@ -36,6 +38,7 @@ interface Props {
   onPoke: (client: Client) => void
   onBlock: (client: Client) => void
   onUnblock: (client: Client) => void
+  onJoinChannel: (client: Client) => void
   onJumpVoice: () => void
   onToast: (message: string) => void
 }
@@ -68,7 +71,7 @@ export function ContactsPage({
   activeId,
   blocked,
   unread,
-  channelName,
+  channels,
   onSelect,
   onSend,
   onOpenProfile,
@@ -76,6 +79,7 @@ export function ContactsPage({
   onPoke,
   onBlock,
   onUnblock,
+  onJoinChannel,
   onJumpVoice,
   onToast,
 }: Props) {
@@ -88,10 +92,32 @@ export function ContactsPage({
   const listRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
 
-  const contacts = useMemo(() => clients.filter((client) => !client.self), [clients])
+  const channelOf = (client: Client) =>
+    client.channelId
+      ? stripTsTags(channels.find((channel) => channel.id === client.channelId)?.name ?? '')
+      : ''
+
+  // 在线成员排在前面，离线（来自本地聊天记录）排在后面，避免状态混淆
+  const contacts = useMemo(
+    () =>
+      clients
+        .filter((client) => !client.self)
+        .slice()
+        .sort((a, b) => {
+          const online = Number(b.presence !== 'offline') - Number(a.presence !== 'offline')
+          if (online !== 0) return online
+          return stripClientTags(a.name).localeCompare(stripClientTags(b.name), 'zh-Hans-CN')
+        }),
+    [clients],
+  )
+  const onlineCount = contacts.filter((client) => client.presence !== 'offline').length
   const active = contacts.find((client) => client.id === activeId) ?? null
   const activeMessages = messages.filter((message) => message.contactId === activeId)
   const isBlocked = active ? blocked.includes(active.id) : false
+  const activeOnline = Boolean(active && active.presence !== 'offline')
+  const activeChannelName = active ? channelOf(active) : ''
+  const canJoinActive =
+    Boolean(active && activeOnline && active.channelId) && active?.channelId !== self?.channelId
 
   const lastByContact = useMemo(() => {
     const map = new Map<string, DmMessage>()
@@ -126,6 +152,10 @@ export function ContactsPage({
   const submit = () => {
     const text = draft.trim()
     if (!text || !active || isBlocked) return
+    if (!activeOnline) {
+      onToast('对方不在线，TeamSpeak 不保存离线消息')
+      return
+    }
     onSend(text)
     setDraft('')
     inputRef.current?.focus()
@@ -151,7 +181,7 @@ export function ContactsPage({
         <header className="dm-side-head">
           <div>
             <h2>私聊</h2>
-            <span>{recent.length} 个会话 · 服务器消息转发</span>
+            <span>{onlineCount} 人在线 · {recent.length} 个会话</span>
           </div>
           <span className="dm-head-icon"><MessageSquare size={16} strokeWidth={1.9} /></span>
         </header>
@@ -185,25 +215,36 @@ export function ContactsPage({
             aria-selected={tab === 'all'}
             onClick={() => setTab('all')}
           >
-            服务器成员
+            全部联系人
           </button>
         </div>
 
         <div className="dm-list">
           {list.map((client) => {
             const last = lastByContact.get(client.id)
+            const online = client.presence !== 'offline'
+            const where = channelOf(client)
             return (
               <button
                 key={client.id}
                 className={`dm-row ${activeId === client.id ? 'active' : ''} ${
                   blocked.includes(client.id) ? 'is-blocked' : ''
-                }`}
+                } ${online ? '' : 'is-offline'}`}
                 onClick={() => onSelect(client.id)}
               >
-                <Avatar letter={client.letter} hue={client.hue} size={36} src={client.avatarUrl} />
+                <span className="dm-row-avatar">
+                  <Avatar
+                    letter={client.letter}
+                    hue={client.hue}
+                    size={36}
+                    src={client.avatarUrl}
+                  />
+                  <span className={`presence dm-presence ${client.presence}`} />
+                </span>
                 <span className="dm-row-body">
                   <span className="dm-row-top">
                     <strong>{stripClientTags(client.name)}</strong>
+                    {online && where && <em className="dm-row-channel">{where}</em>}
                     {unread[client.id] ? (
                       <span className="dm-unread">
                         {unread[client.id] > 99 ? '99+' : unread[client.id]}
@@ -215,9 +256,11 @@ export function ContactsPage({
                   <span className="dm-row-preview">
                     {last
                       ? `${last.self ? '你：' : ''}${last.text}`
-                      : client.presence === 'offline'
-                        ? '离线 · 历史会话'
-                        : '开始一段私聊'}
+                      : online
+                        ? '在线 · 点击开始私聊'
+                        : client.connectedAt === '历史会话'
+                          ? '离线 · 历史会话'
+                          : `离线 · ${client.connectedAt}`}
                   </span>
                 </span>
               </button>
@@ -241,20 +284,49 @@ export function ContactsPage({
         {active ? (
           <>
             <header className="dm-head">
-              <Avatar letter={active.letter} hue={active.hue} size={38} src={active.avatarUrl} />
+              <span className="dm-head-avatar">
+                <Avatar letter={active.letter} hue={active.hue} size={38} src={active.avatarUrl} />
+                <span className={`presence dm-presence ${active.presence}`} />
+              </span>
               <div className="dm-head-id">
                 <strong>{stripClientTags(active.name)}</strong>
-                <span>{active.description}</span>
+                <span className={`dm-head-state ${active.presence}`}>
+                  {activeOnline
+                    ? activeChannelName
+                      ? `在线 · ${activeChannelName}`
+                      : '在线 · 未加入频道'
+                    : active.connectedAt === '历史会话'
+                      ? '离线 · 历史会话'
+                      : `离线 · ${active.connectedAt}`}
+                </span>
               </div>
               <div className="dm-head-actions">
                 <button
                   className="dm-action"
-                  title="邀请进服务器"
+                  title={
+                    canJoinActive
+                      ? `加入 ${stripClientTags(active.name)} 所在的频道`
+                      : '对方不在频道中'
+                  }
+                  disabled={!canJoinActive}
+                  onClick={() => onJoinChannel(active)}
+                >
+                  <LogIn size={16} strokeWidth={1.9} />
+                </button>
+                <button
+                  className="dm-action"
+                  title={activeOnline ? '邀请进服务器' : '对方不在线，无法发送邀请'}
+                  disabled={!activeOnline}
                   onClick={() => onInvite(active)}
                 >
                   <UserPlus size={16} strokeWidth={1.9} />
                 </button>
-                <button className="dm-action" title="戳一戳" onClick={() => onPoke(active)}>
+                <button
+                  className="dm-action"
+                  title={activeOnline ? '戳一戳' : '对方不在线'}
+                  disabled={!activeOnline}
+                  onClick={() => onPoke(active)}
+                >
                   <Hand size={16} strokeWidth={1.9} />
                 </button>
                 <button
@@ -281,7 +353,16 @@ export function ContactsPage({
                 ) : (
                   <div className={`msg ${message.self ? 'is-self' : ''}`} key={message.id}>
                     <span className="msg-avatar static">
-                      <Avatar letter={message.letter} hue={message.hue} size={28} src={message.avatarUrl} />
+                      <Avatar
+                        letter={message.letter}
+                        hue={message.hue}
+                        size={28}
+                        src={
+                          message.self
+                            ? self?.avatarUrl ?? message.avatarUrl
+                            : active.avatarUrl ?? message.avatarUrl
+                        }
+                      />
                     </span>
                     <div className="msg-body">
                       <div className="msg-head">
@@ -318,6 +399,13 @@ export function ContactsPage({
               </div>
             )}
 
+            {!isBlocked && !activeOnline && (
+              <div className="dm-offline-note">
+                <WifiOff size={14} strokeWidth={2} />
+                对方当前不在服务器，TeamSpeak 无法投递离线消息；上方记录仅保存在本机。
+              </div>
+            )}
+
             {emojiOpen && (
               <div className="emoji-pop dm-emoji">
                 <div className="emoji-pop-head">
@@ -337,7 +425,7 @@ export function ContactsPage({
             )}
 
             <form
-              className={`composer ${isBlocked ? 'disabled' : ''}`}
+              className={`composer ${isBlocked || !activeOnline ? 'disabled' : ''}`}
               onSubmit={(event) => {
                 event.preventDefault()
                 submit()
@@ -347,7 +435,7 @@ export function ContactsPage({
                 type="button"
                 className={`composer-icon ${emojiOpen ? 'active' : ''}`}
                 title="表情"
-                disabled={isBlocked}
+                disabled={isBlocked || !activeOnline}
                 onClick={() => setEmojiOpen((value) => !value)}
               >
                 <Smile size={17} strokeWidth={1.9} />
@@ -355,17 +443,25 @@ export function ContactsPage({
               <input
                 ref={inputRef}
                 value={draft}
-                disabled={isBlocked}
+                disabled={isBlocked || !activeOnline}
                 onChange={(event) => setDraft(event.target.value)}
                 placeholder={
-                  isBlocked ? '已屏蔽该联系人' : `发送私聊消息给 ${stripClientTags(active.name)}`
+                  isBlocked
+                    ? '已屏蔽该联系人'
+                    : activeOnline
+                      ? `发送私聊消息给 ${stripClientTags(active.name)}`
+                      : '对方不在线，无法发送私聊消息'
                 }
                 maxLength={500}
               />
               <span className="dm-privacy">
                 <ShieldCheck size={11} strokeWidth={2} /> 仅双方可见
               </span>
-              <button type="submit" className="send-btn" disabled={isBlocked || !draft.trim()}>
+              <button
+                type="submit"
+                className="send-btn"
+                disabled={isBlocked || !activeOnline || !draft.trim()}
+              >
                 <Send size={14} strokeWidth={2} />
                 发送
               </button>
@@ -390,10 +486,15 @@ export function ContactsPage({
               style={{ ['--h' as string]: active.hue }}
             />
             <div className="dm-profile-top">
-              <Avatar letter={active.letter} hue={active.hue} size={58} src={active.avatarUrl} />
+              <span className="dm-profile-avatar">
+                <Avatar letter={active.letter} hue={active.hue} size={58} src={active.avatarUrl} />
+                <span className={`presence dm-presence lg ${active.presence}`} />
+              </span>
               <div>
                 <strong>{stripClientTags(active.name)}</strong>
-                <span>服务器成员</span>
+                <span className={activeOnline ? 'dm-presence-chip online' : 'dm-presence-chip offline'}>
+                  {activeOnline ? '在线' : '离线'}
+                </span>
               </div>
             </div>
             <p className="dm-profile-desc">{active.description}</p>
@@ -406,7 +507,11 @@ export function ContactsPage({
             <div className="dm-profile-meta">
               <div>
                 <span>当前频道</span>
-                <strong>{stripTsTags(channelName)}</strong>
+                <strong>
+                  {activeOnline
+                    ? activeChannelName || '未加入频道'
+                    : '不在服务器'}
+                </strong>
               </div>
               <div>
                 <span>平台</span>
@@ -423,11 +528,24 @@ export function ContactsPage({
             </div>
 
             <div className="dm-profile-actions">
-              <button className="primary-btn" onClick={() => onInvite(active)}>
+              <button
+                className="primary-btn"
+                disabled={!canJoinActive}
+                title={canJoinActive ? '加入对方所在频道' : '对方不在频道中'}
+                onClick={() => onJoinChannel(active)}
+              >
+                <LogIn size={14} strokeWidth={2} />
+                加入 TA 的频道
+              </button>
+              <button
+                className="ghost-btn"
+                disabled={!activeOnline}
+                onClick={() => onInvite(active)}
+              >
                 <UserPlus size={14} strokeWidth={2} />
                 邀请进服务器
               </button>
-              <button className="ghost-btn" onClick={() => onPoke(active)}>
+              <button className="ghost-btn" disabled={!activeOnline} onClick={() => onPoke(active)}>
                 <Hand size={14} strokeWidth={2} />
                 戳一戳
               </button>
