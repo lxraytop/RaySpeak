@@ -127,6 +127,52 @@ const hotkeyRows = [
   ['layout', '切换房间布局'],
 ] as const
 
+const appearancePresets: Array<{
+  id: 'fresh' | 'immersive' | 'readable'
+  name: string
+  desc: string
+  patch: Partial<Settings>
+}> = [
+  {
+    id: 'fresh',
+    name: '清爽',
+    desc: '浅色 · 低模糊 · 标准面板',
+    patch: {
+      theme: 'light',
+      blur: 8,
+      panelOpacity: 80,
+      contrast: 'normal',
+      animations: true,
+      cardStyle: 'raised',
+    },
+  },
+  {
+    id: 'immersive',
+    name: '沉浸',
+    desc: '深色 · 强模糊 · 半透明',
+    patch: {
+      theme: 'dark',
+      blur: 24,
+      panelOpacity: 60,
+      contrast: 'normal',
+      animations: true,
+      cardStyle: 'flat',
+    },
+  },
+  {
+    id: 'readable',
+    name: '高对比',
+    desc: '清晰文字 · 不透明面板',
+    patch: {
+      contrast: 'high',
+      blur: 6,
+      panelOpacity: 100,
+      animations: false,
+      cardStyle: 'outline',
+    },
+  },
+]
+
 function AboutRow({ label, value }: { label: string; value: ReactNode }) {
   return (
     <div className="about-row">
@@ -333,6 +379,37 @@ export function SettingsPage({
   }
 
   const active = navItems.find((item) => item.id === section) ?? navItems[0]
+  const presetActive = (patch: Partial<Settings>) =>
+    Object.entries(patch).every(
+      ([key, value]) =>
+        JSON.stringify(settings[key as keyof Settings]) === JSON.stringify(value),
+    )
+  const resetAppearance = () => {
+    onChange({
+      theme: defaultSettings.theme,
+      accent: defaultSettings.accent,
+      density: defaultSettings.density,
+      radius: defaultSettings.radius,
+      blur: defaultSettings.blur,
+      panelOpacity: defaultSettings.panelOpacity,
+      contrast: defaultSettings.contrast,
+      chatFontSize: defaultSettings.chatFontSize,
+      sidebarWidth: defaultSettings.sidebarWidth,
+      background: defaultSettings.background,
+      backgroundImage: defaultSettings.backgroundImage,
+      backgroundDim: defaultSettings.backgroundDim,
+      layout: defaultSettings.layout,
+      cardStyle: defaultSettings.cardStyle,
+      animations: defaultSettings.animations,
+      chatBubbles: defaultSettings.chatBubbles,
+      showTimestamps: defaultSettings.showTimestamps,
+      showMemberState: defaultSettings.showMemberState,
+      showChannelIcons: defaultSettings.showChannelIcons,
+      showGroupChips: defaultSettings.showGroupChips,
+      showChannelCounts: defaultSettings.showChannelCounts,
+    })
+    onToast('已恢复默认外观')
+  }
   const dark = isDark(settings.theme)
   const themeLabel = { light: '浅色', dark: '深色', system: '跟随系统' }[settings.theme]
   const layoutLabel = settings.layout === 'cards' ? '成员卡片' : '网格式'
@@ -825,9 +902,42 @@ export function SettingsPage({
                     <span>布局 · {layoutLabel}</span>
                     <span>密度 · {densityLabel}</span>
                     <span>圆角 · {settings.radius}px</span>
+                    <span>字号 · {settings.chatFontSize}px</span>
+                    <span>对比 · {settings.contrast === 'high' ? '高' : '标准'}</span>
                   </div>
                 </div>
               </section>
+
+              <SetCard title="快速预设" desc="一键套用常用组合，套用后仍可逐项微调">
+                <div className="preset-grid">
+                  {appearancePresets.map((preset) => {
+                    const active =
+                      presetActive(preset.patch)
+                    return (
+                      <button
+                        key={preset.id}
+                        className={`preset-card ${active ? 'active' : ''}`}
+                        onClick={() => onChange(preset.patch)}
+                      >
+                        <span className={`preset-thumb ${preset.id}`}>
+                          <i className="pt-panel" />
+                          <i className="pt-panel" />
+                          <i className="pt-panel" />
+                        </span>
+                        <span className="preset-copy">
+                          <strong>{preset.name}</strong>
+                          <em>{preset.desc}</em>
+                        </span>
+                        {active && (
+                          <span className="preset-check">
+                            <Check size={11} strokeWidth={3} />
+                          </span>
+                        )}
+                      </button>
+                    )
+                  })}
+                </div>
+              </SetCard>
 
               <SetCard title="主题" desc="浅色、深色或跟随系统，强调色贯穿按钮与选中态">
                 <div className="theme-options">
@@ -1016,12 +1126,49 @@ export function SettingsPage({
                     onChange={(value) => onChange({ panelOpacity: value })}
                   />
                 </SettingRow>
+                <SettingRow title="消息字号" desc="聊天与私聊正文大小，12–16 px">
+                  <Slider
+                    value={settings.chatFontSize}
+                    min={12}
+                    max={16}
+                    suffix=" px"
+                    onChange={(value) => onChange({ chatFontSize: value })}
+                  />
+                </SettingRow>
+                <SettingRow title="侧栏宽度" desc="频道列表宽度，屏幕较宽时加宽更好读">
+                  <Slider
+                    value={settings.sidebarWidth}
+                    min={232}
+                    max={320}
+                    step={12}
+                    suffix=" px"
+                    onChange={(value) => onChange({ sidebarWidth: value })}
+                  />
+                </SettingRow>
+                <SettingRow
+                  title="高对比文字"
+                  desc="加深次要文字与分割线，适合低亮度或高分辨率屏幕"
+                >
+                  <Switch
+                    checked={settings.contrast === 'high'}
+                    onChange={(value) =>
+                      onChange({ contrast: value ? 'high' : 'normal' })
+                    }
+                  />
+                </SettingRow>
                 <SettingRow title="界面动画" desc="关闭后取消过渡与说话光效">
                   <Switch
                     checked={settings.animations}
                     onChange={(value) => onChange({ animations: value })}
                   />
                 </SettingRow>
+                <div className="inline-actions">
+                  <button className="small-btn ghost" onClick={resetAppearance}>
+                    <RotateCcw size={13} strokeWidth={2} />
+                    恢复默认外观
+                  </button>
+                  <span className="set-note">仅重置外观相关项，不影响账号、音频与快捷键</span>
+                </div>
               </SetCard>
 
               <SetCard title="背景" desc="预设渐变或自定义图片，遮罩强度保证内容可读">

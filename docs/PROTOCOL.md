@@ -19,28 +19,58 @@
 
 - 欢迎流：`channellist`、`channelclientlist`、`channellistfinished` 由 crate 组装成
   `DirectoryCache`，`directory_snapshot()` 输出树。
+- **欢迎流不保证下发全服成员**：部分服务器只推当前频道的 `channelclientlist`，
+  其他频道成员要等客户端走进去才出现（表现为“新号只看到自己频道的人”）。
+  因此连接完成后主动执行一次 `clientlist -uid -away -voice -groups`，把结果
+  upsert 进目录（vendor 补丁 `Client::refresh_clients`），并在快照循环里每 ~30 秒
+  对齐一次，修复漏掉的 join/leave 通知。
+- **频道密码位同样要主动拉**：欢迎流的 `channellist` 不保证带
+  `channel_flag_password`，用 `channellist -icon -flags` 再刷一次
+  （`Client::refresh_channels`），否则加密频道不会弹密码框。
 - 排序：`channel_order` **不是序号**，而是同级前一个频道的 ID（predecessor）。
   crate 的 `ordered_channels_from_index()` / `ordered_sibling_ids()` 已按该链输出；
   前端只按快照数组顺序渲染。
 - 频道父节点缺失或为 0 时是根节点；spacer 频道（`[cspacer]` 等）也属于节点，
-  其子节点需要渲染。组 ID 使用 `s<sgid>` / `c<cgid>` 前缀隔离命名空间。
-- 手动刷新：`refresh_directory` 只重新拉组与 codec quality，然后复用 crate 的
-  目录缓存。频道变更依赖目录事件订阅；crate 未暴露强制重拉 API。
+  它同样是真实频道（可以有人、可以被进入），前端必须显示其人数与成员，
+  其子节点需要按层级缩进渲染。组 ID 使用 `s<sgid>` / `c<cgid>` 前缀隔离命名空间。
+- 手动刷新：`refresh_directory` 现在会先重拉 `clientlist` 与频道 flags，再拉组与
+  codec quality，然后复用 crate 的目录缓存。
 
-## 3. 通知订阅（关键）
+## 3. 成员可见性与事件订阅（关键）
 
-连接成功后必须发送：
+语音连接（`client_type=0`）和 ServerQuery（`client_type=1`）是两套不同的能力，
+实测结论如下（真实服务器抓包）：
 
-```
-servernotifyregister event=server
-servernotifyregister event=channel
-servernotifyregister event=textserver
-servernotifyregister event=textchannel
-servernotifyregister event=textprivate
-```
+| 命令 | 语音连接结果 | 说明 |
+| --- | --- | --- |
+| `servernotifyregister event=...` | `error id=516 msg=invalid client type` | 查询会话专用，语音连接一律拒绝 |
+| `clientlist [-uid -groups ...]` | `error id=2568 insufficient client permissions` | 普通身份无该权限，`failed_permid=29` |
+| `channelsubscribeall` | `error id=0 msg=ok` | 订阅整棵频道树 |
 
-否则文字消息能发出去但收不到（连自己的回声都没有），频道/成员变化也不实时。
-实现位置：`connect_server` 中逐个 `exec_command`，失败忽略。
+**结论：连接成功后必须发送 `channelsubscribeall`。** 不发这条命令时，服务器只
+推送当前频道的成员，客户端走遍其他频道才看得见人；发了之后服务器会补推全部
+频道的 `channelclientlist` / `notifycliententerview`，本地目录缓存即拥有全服成员。
+
+- 文字消息、成员进出与换频道事件由上述订阅直接推送，不需要 `servernotifyregister`。
+- 实现位置：`connect_server` 在 `wait_directory_ready` 之后发送（失败仅降级为
+  “只看得到本频道”，不中断连接）；快照循环每 ~30 秒重订阅一次做无损重同步；
+  `refresh_directory` 同样是重订阅而不是拉 `clientlist`。
+- 参考实现：WebSpeak（`@honeybbq/teamspeak`）在欢迎流之后调用的正是
+  `channelsubscribeall`，并从 SDK 本地目录读成员，不发 `clientlist`。
+
+## 3.1 加密频道与加入失败
+
+- 加入频道走 `clientmove clid=<self> cid=<id> cpw=<channel_password>`（与参考实现
+  字节一致；`cpw` 只在非空时携带，值会做 TS3 转义）。密码不落盘、不写日志。
+- 实测错误：密码被拒返回 `error id=781 msg=invalid channel password`；权限不足返回
+  `error id=2568 insufficient client permissions`。两者必须分开提示，否则非管理员会
+  被“密码错误”误导着反复重输。
+- 注意：TS3 对未达“加入权限值”的加密频道也可能统一回报 781，若密码确认正确仍被
+  拒绝，需要管理员降低该频道的 `i_channel_needed_join_power` 或提升客户端组权限。
+- 历史 bug：`clean_error()` 曾把所有含 `password` 的错误改写成“服务器密码错误”，
+  导致频道密码错误被误报；现在只有 `server password` 才按登录密码处理。
+- 前端在密码错误时保留弹窗并显示原因，可直接重试；频道没有密码标志但服务器要求
+  密码（781）时，也会在失败后补弹密码框。
 
 ## 4. 文字消息
 

@@ -144,6 +144,16 @@ TeamSpeak 服务器
     「设置 → 网络与高级 → 清理本地缓存」会同时清空它们。
 14. **面板透明度**：所有纯色面板走 `--panel*` + `--opacity-k`（`panelOpacity / 80`），
     新增面板请使用 `var(--panel)`，不要写死 `rgba(255,255,255,…)`，否则不透明度滑杆会失效。
+15. **成员可见性靠 `channelsubscribeall`，不是 `clientlist`**：语音连接（client_type=0）上
+    `clientlist` 一律 `2568 insufficient client permissions`、`servernotifyregister` 一律
+    `516 invalid client type`（两者都是查询会话的能力）。连接后必须发一次
+    `channelsubscribeall`，服务器才会补推其他频道的 `channelclientlist` /
+    `notifycliententerview`；快照循环每 ~30 秒重订阅一次做无损重同步。不要再往
+    `connect_server` 里加 `servernotifyregister` / `refresh_clients`，它们是无效命令。
+16. **频道密码位来自欢迎流 `channellist`**（`channel_flag_password`），`refresh_channels`
+    同样会被 2568 拒绝，别再调用。加入用 `clientmove clid=<self> cid= cpw=`，密码被拒实测
+    是 `id=781 invalid channel password`、权限不足是 `2568`；两者提示必须分开，且别把所有
+    含 “password” 的错误都当成服务器登录密码。
 
 ## 当前状态与已知缺口
 

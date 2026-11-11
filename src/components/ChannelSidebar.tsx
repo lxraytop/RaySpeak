@@ -42,14 +42,20 @@ export function ChannelSidebar({
 
   const query = search.trim().toLowerCase()
 
+  // 离线联系人会留在联系人列表里，但绝不能计入“在线人数”
+  const onlineClients = useMemo(
+    () => clients.filter((client) => client.presence !== 'offline'),
+    [clients],
+  )
+
   const occupiedChannels = useMemo(
     () =>
       channels.filter(
         (channel) =>
           channel.kind === 'voice' &&
-          clients.some((client) => client.channelId === channel.id),
+          onlineClients.some((client) => client.channelId === channel.id),
       ).length,
-    [channels, clients],
+    [channels, onlineClients],
   )
 
   const visibleChannels = useMemo(() => {
@@ -89,8 +95,10 @@ export function ChannelSidebar({
         <span className="server-meta">
           <span className="server-name">{stripTsTags(serverName) || '语音服务器'}</span>
           <span className="server-sub">
-            {serverMax > 0 ? `${clients.length}/${serverMax}` : clients.length} 人在线 ·{' '}
-            {occupiedChannels} 个频道有人
+            {serverMax > 0
+              ? `${onlineClients.length}/${serverMax}`
+              : onlineClients.length}{' '}
+            人在线 · {occupiedChannels} 个频道有人
           </span>
         </span>
       </div>
@@ -134,7 +142,7 @@ export function ChannelSidebar({
         {sections.map((section) => {
           const list = visibleChannels.filter((channel) => channel.section === section.id)
           if (list.length === 0) return null
-          const online = clients.filter((client) =>
+          const online = onlineClients.filter((client) =>
             channels.some(
               (channel) =>
                 channel.id === client.channelId &&

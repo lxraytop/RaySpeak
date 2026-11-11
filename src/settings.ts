@@ -15,6 +15,9 @@ export interface Settings {
   radius: number
   blur: number
   panelOpacity: number
+  contrast: 'normal' | 'high'
+  chatFontSize: number
+  sidebarWidth: number
   background: BackgroundId
   backgroundImage: string
   backgroundDim: number
@@ -127,6 +130,9 @@ export const defaultSettings: Settings = {
   radius: 14,
   blur: 12,
   panelOpacity: 80,
+  contrast: 'normal',
+  chatFontSize: 13,
+  sidebarWidth: 268,
   background: 'mist',
   backgroundImage: '',
   backgroundDim: 30,
@@ -276,9 +282,12 @@ export function applySettings(settings: Settings) {
   root.dataset.memberState = settings.showMemberState ? 'on' : 'off'
   root.dataset.groupChips = settings.showGroupChips ? 'on' : 'off'
   root.dataset.channelCounts = settings.showChannelCounts ? 'on' : 'off'
+  root.dataset.contrast = settings.contrast ?? 'normal'
   root.style.setProperty('--accent', settings.accent)
   root.style.setProperty('--radius-card', `${settings.radius}px`)
   root.style.setProperty('--panel-blur', `${settings.blur}px`)
+  root.style.setProperty('--chat-font', `${settings.chatFontSize ?? 13}px`)
+  root.style.setProperty('--sidebar-w', `${settings.sidebarWidth ?? 268}px`)
   // 纯色面板不透明度：100% 完全不透明，默认 80% 保持轻微透出背景
   const panelOpacity = Math.min(100, Math.max(30, settings.panelOpacity ?? 80))
   root.style.setProperty('--opacity-k', (panelOpacity / 80).toFixed(3))

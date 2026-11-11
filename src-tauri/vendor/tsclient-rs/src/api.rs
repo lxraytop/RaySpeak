@@ -122,6 +122,15 @@ pub async fn client_move(
             .map(|(k, v)| (*k, v.as_str()))
             .collect::<Vec<_>>(),
     );
+    if std::env::var_os("RAYSPEAK_TRACE").is_some() {
+        // 只暴露结构，不把频道密码原样写进日志。
+        let masked = if password.is_empty() {
+            cmd.clone()
+        } else {
+            cmd.replace(&format!("cpw={password}"), "cpw=***")
+        };
+        eprintln!("[trace] clientmove -> {masked}");
+    }
     client.exec_command(&cmd, CMD_TIMEOUT_MS).await
 }
 
@@ -176,6 +185,18 @@ pub async fn get_channel_description(client: &Client, channel_id: u64) -> Result
 pub async fn list_channels(client: &Client) -> Result<Vec<ChannelInfo>, Error> {
     let data = client
         .exec_command_with_response("channellist -icon", QUERY_TIMEOUT_MS)
+        .await?;
+    Ok(data.iter().filter_map(parse_channel).collect())
+}
+
+/// List all channels including per-channel flags (password, limits, topic).
+///
+/// The welcome stream is not guaranteed to carry `channel_flag_password` for
+/// every channel, so a client that never asks again cannot tell locked rooms
+/// from open ones. `-flags -topic` makes the server include those fields.
+pub async fn list_channels_with_flags(client: &Client) -> Result<Vec<ChannelInfo>, Error> {
+    let data = client
+        .exec_command_with_response("channellist -icon -flags -topic", QUERY_TIMEOUT_MS)
         .await?;
     Ok(data.iter().filter_map(parse_channel).collect())
 }

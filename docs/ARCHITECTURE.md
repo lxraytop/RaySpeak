@@ -55,6 +55,8 @@ Tokio runtime。**新增任何协议命令都必须沿用此模式。**
 每 650ms：
 
 - 检查 generation、连接状态、目录是否 ready
+- 每 ~46 个 tick（约 30 秒）用 `Client::refresh_clients()` 对齐一次全服成员，
+  弥补欢迎流只下发当前频道、以及丢失 join/leave 通知的情况
 - `directory_snapshot()` → `build_snapshot()`
 - 与 `last_snapshot` 比较，变化才 emit `ts://snapshot`
 - 连接断开时 emit `ts://disconnected` 并清理 client
@@ -120,6 +122,20 @@ Rust/前端都**不得**再按 `ChannelDto.order` 数值排序。
 7. 头像 effect 先查本地缓存，未命中再下载并写回缓存
 8. `rememberClients()` 把在线成员写入联系人目录，供离线展示使用
 
+### 成员可见性
+
+欢迎流是服务器驱动的，可能只包含落地频道的 `channelclientlist`。连接成功后
+`connect_server` 会立刻执行 `refresh_clients()`（`clientlist -uid -away -voice -groups`）
+把全服成员 upsert 进目录，随后快照循环每 ~30 秒再对齐一次；`refresh_directory`
+（刷新按钮）也会先做同样的事。这样“新号只能看到自己待过的频道成员”的问题不再出现，
+而且成员进出会随通知实时更新、以慢轮询兜底。
+
+### 频道树层级
+
+`ChannelTree` 用嵌套容器渲染层级：`.tree-branch` 负责缩进与左侧引导线，
+不再用 `depth * 14` 的 padding 模拟。`[cspacer]` 分隔频道仍是真实频道：
+渲染成分组标题样式，但保留人数、成员列表与点击进入的能力。
+
 `toClient()` 只有在 avatarHash 未变时才保留旧 `avatarUrl`，避免换头像后显示旧图。
 
 ### 个人资料同步
@@ -163,10 +179,15 @@ Rust/前端都**不得**再按 `ChannelDto.order` 数值排序。
 
 ### 外观投影
 
-`applySettings()` 把设置投影为 CSS 变量：`--accent`、`--radius-card`、`--panel-blur`，
-以及面板透明度系数 `--opacity-k`（= `panelOpacity / 80`）。`--panel` / `--panel-strong` /
-`--panel-soft` 在 CSS 中用 `calc(alpha * var(--opacity-k))` 计算，因此「外观 → 纯色区域
-不透明度」一个滑块即可统一调整所有纯色面板，默认 80%。
+`applySettings()` 把设置投影为 CSS 变量：`--accent`、`--radius-card`、`--panel-blur`、
+`--chat-font`、`--sidebar-w`，以及面板透明度系数 `--opacity-k`（= `panelOpacity / 80`）
+与 `data-contrast`。`--panel` / `--panel-strong` / `--panel-soft` 在 CSS 中用
+`calc(alpha * var(--opacity-k))` 计算，因此「外观 → 纯色区域不透明度」一个滑块即可统一
+调整所有纯色面板，默认 80%。
+
+可配置项：主题、强调色、布局、卡片风格、密度、圆角、背景模糊、面板不透明度、
+消息字号、侧栏宽度、高对比文字、动画、背景与内容显示开关。另有三组快速预设
+（清爽 / 沉浸 / 高对比）与「恢复默认外观」。
 
 ### 房间头部快捷操作
 

@@ -10,8 +10,8 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tsclient_rs::{
     banClient, clientKick, clientMove, download_icon, fileTransferDeleteFile, identityFromString,
-    poke, send_plugin_command, sendTextMessage, uploadFileData, downloadFileData, Client,
-    ClientOptions, ClientStatus, DirectorySnapshot, Event, Identity, KickReason, Logger,
+    listClients, poke, send_plugin_command, sendTextMessage, uploadFileData, downloadFileData,
+    Client, ClientOptions, ClientStatus, DirectorySnapshot, Event, Identity, KickReason, Logger,
     PluginCommandTarget, generateIdentity,
 };
 
@@ -44,7 +44,21 @@ struct HostLogger {
 }
 
 impl Logger for HostLogger {
-    fn debug(&self, _msg: &str, _args: &[&dyn std::fmt::Display]) {}
+    fn debug(&self, msg: &str, _args: &[&dyn std::fmt::Display]) {
+        // RAYSPEAK_TRACE=1 时把下行命令序列写入临时文件，便于排查可见性问题。
+        if std::env::var_os("RAYSPEAK_TRACE").is_none() {
+            return;
+        }
+        let path = std::env::temp_dir().join("rayspeak_trace.log");
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            use std::io::Write;
+            let _ = writeln!(file, "{msg}");
+        }
+    }
     fn info(&self, msg: &str, _args: &[&dyn std::fmt::Display]) {
         let Some(rest) = msg.strip_prefix("connecting to server: ") else {
             return;
@@ -248,14 +262,54 @@ fn clean_error(message: impl std::fmt::Display) -> String {
     for secret in secrets {
         text = text.replace(&secret, "服务器");
     }
-    if text.to_lowercase().contains("password") {
-        text = format!("服务器密码错误或已失效（{text}）");
+    // 只有服务器登录密码的错误才改写成登录提示：频道密码错误同样带有
+    // "password" 字样，曾因此被误报成“服务器密码错误”，掩盖了真实原因。
+    let lower = text.to_lowercase();
+    if lower.contains("server password") || lower.contains("serverpassword") {
+        text = "服务器密码错误或已失效".to_string();
     }
     if text.is_empty() {
         "操作失败".to_string()
     } else {
         text
     }
+}
+
+/// TS3 服务器错误 → 面向用户的提示。`clientmove` 的失败原因分成“密码不对”和
+/// “权限不足”两类，混在一起会让人误以为是服务器密码错误。
+///
+/// 实测（RaySpeak 服务器）：频道密码被拒返回 `invalid channel password (id=781)`，
+/// 而权限不足返回的是 `insufficient client permissions (id=2568)`——两者必须分开，
+/// 否则非管理员会被“密码错误”误导着反复重输。
+fn join_error_text(message: impl std::fmt::Display) -> String {
+    let text = message.to_string();
+    let lower = text.to_lowercase();
+    let id = text
+        .rsplit_once("id=")
+        .map(|(_, tail)| tail.trim_end_matches(')').trim().to_string())
+        .and_then(|value| value.parse::<i32>().ok());
+    if lower.contains("invalid channel password") || matches!(id, Some(781)) {
+        return "频道密码被服务器拒绝：提示「invalid channel password」。请确认密码；\
+                若密码确定正确，说明该频道还提高了加入权限值，需要管理员放行"
+            .to_string();
+    }
+    if matches!(id, Some(2568))
+        || lower.contains("insufficient client permissions")
+        || lower.contains("join power")
+    {
+        return "当前身份没有加入该频道的权限（频道提高了加入权限值），需要管理员调整"
+            .to_string();
+    }
+    if lower.contains("full") || lower.contains("maxclients") || matches!(id, Some(783)) {
+        return "频道人数已满，暂时无法加入".to_string();
+    }
+    if lower.contains("invalid channelid")
+        || lower.contains("invalid channel id")
+        || matches!(id, Some(768))
+    {
+        return "频道不存在或已被删除".to_string();
+    }
+    clean_error(text)
 }
 
 fn get_client(bridge: &Bridge) -> Result<Arc<Client>, String> {
@@ -537,8 +591,10 @@ fn export_identity(app: AppHandle, destination: String) -> Result<(), String> {
 
 fn spawn_snapshot_loop(app: AppHandle, bridge: Arc<Bridge>, generation: u64) {
     tauri::async_runtime::spawn(async move {
+        let mut ticks: u64 = 0;
         loop {
             tokio::time::sleep(Duration::from_millis(650)).await;
+            ticks = ticks.wrapping_add(1);
             if bridge.generation.load(Ordering::SeqCst) != generation {
                 break;
             }
@@ -556,6 +612,15 @@ fn spawn_snapshot_loop(app: AppHandle, bridge: Arc<Bridge>, generation: u64) {
             }
             if !client.directory_ready() {
                 continue;
+            }
+            // 每 ~30 秒重新订阅一次整棵频道树：订阅可能因权限调整、重连或
+            // 丢包漏掉成员事件，重新 `channelsubscribeall` 会让服务器把全部
+            // 频道的成员再推一遍，等价于一次无损重同步。
+            if ticks % 46 == 0 {
+                let client = Arc::clone(&client);
+                tauri::async_runtime::spawn(async move {
+                    let _ = client.exec_command("channelsubscribeall", 5000).await;
+                });
             }
             let Some(snapshot) = client.directory_snapshot() else {
                 continue;
@@ -653,15 +718,17 @@ async fn connect_server(
             .map_err(clean_error)?;
 
             let self_clid = client.client_id();
-            // Without these subscriptions the server never pushes text
-            // notifications, so messages we send are relayed to others but
-            // never echoed back to this client. Directory events keep the
-            // channel tree and members live without waiting for a poll.
-            for event in ["server", "channel", "textchannel", "textprivate", "textserver"] {
-                let _ = client
-                    .exec_command(&format!("servernotifyregister event={event}"), 4000)
-                    .await;
+            // 关键：语音连接（client_type=0）的欢迎流只带当前频道的成员，
+            // 服务器要等客户端订阅整棵频道树后才会推送其余频道的
+            // channelclientlist / notifycliententerview。不发这条命令，新登录
+            // 的账号永远只看得见自己频道里的人（哪怕别人就在隔壁频道）。
+            // 失败只降级为「仅当前频道可见」，不能中断连接。
+            if let Err(error) = client.exec_command("channelsubscribeall", 5000).await {
+                eprintln!("channelsubscribeall 失败，成员可见范围将限制在当前频道: {error}");
             }
+            // 说明：这里不要在语音连接上发 servernotifyregister / clientlist。
+            // 前者对 client_type=0 一律返回 516 invalid client type，后者对
+            // 普通身份返回 2568 权限不足；成员与事件都来自上面的订阅。
             let groups = fetch_groups(&client).await;
             let quality = fetch_channel_quality(&client).await;
             let snapshot = client
@@ -711,6 +778,45 @@ fn spawn_disconnect(client: Arc<Client>) {
     });
 }
 
+/// 诊断用：把服务器对 `clientlist` / `channelclientlist` 的响应原样暴露出来，
+/// 用来确认“看不到其他频道成员”是权限限制还是本地合并逻辑的问题。
+#[tauri::command]
+async fn probe_clients(state: State<'_, Arc<Bridge>>) -> Result<serde_json::Value, String> {
+    let bridge = state.inner().clone();
+    let client = get_client(&bridge)?;
+    run_proto(bridge, move |runtime| {
+        runtime.block_on(async move {
+            let mut out = serde_json::Map::new();
+            for cmd in [
+                "clientlist",
+                "clientlist -uid",
+                "clientlist -away -voice",
+                "clientlist -groups",
+                "clientlist -uid -away -voice -groups",
+            ] {
+                let value = match client.exec_command_with_response(cmd, 6000).await {
+                    Ok(rows) => serde_json::json!({
+                        "rows": rows.len(),
+                        "clients": rows
+                            .iter()
+                            .map(|row| serde_json::json!({
+                                "clid": row.get("clid"),
+                                "name": row.get("client_nickname"),
+                                "cid": row.get("cid"),
+                                "type": row.get("client_type"),
+                            }))
+                            .collect::<Vec<_>>(),
+                    }),
+                    Err(error) => serde_json::json!({ "error": error.to_string() }),
+                };
+                out.insert(cmd.to_string(), value);
+            }
+            Ok(serde_json::Value::Object(out))
+        })
+    })
+    .await
+}
+
 #[tauri::command]
 fn get_snapshot(state: State<'_, Arc<Bridge>>) -> Result<SnapshotDto, String> {
     let bridge = state.inner();
@@ -733,6 +839,9 @@ async fn refresh_directory(state: State<'_, Arc<Bridge>>) -> Result<SnapshotDto,
     let job_bridge = bridge.clone();
     run_proto(bridge, move |runtime| {
         runtime.block_on(async move {
+            // `clientlist` 对普通身份不可用（2568），刷新目录时重新订阅整棵
+            // 频道树，服务器会把所有频道的成员重新推一遍。
+            let _ = client.exec_command("channelsubscribeall", 5000).await;
             let groups = fetch_groups(&client).await;
             let quality = fetch_channel_quality(&client).await;
             let self_clid = client.client_id();
@@ -771,7 +880,7 @@ async fn join_channel(
         runtime.block_on(async move {
             clientMove(&client, client.client_id(), channel_id, &password)
                 .await
-                .map_err(clean_error)
+                .map_err(join_error_text)
         })
     })
     .await
@@ -1720,14 +1829,22 @@ async fn send_plugin_command_backend(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+    let builder = tauri::Builder::default();
+    // 单实例必须保持“第一个注册”（深链转发依赖它）。本地联调需要同时运行两个
+    // 客户端来验证跨频道成员可见性时，可用 RAYSPEAK_ALLOW_MULTI_INSTANCE=1
+    // 启动第二个实例；正常用户启动路径不受影响。
+    let builder = if std::env::var_os("RAYSPEAK_ALLOW_MULTI_INSTANCE").is_some() {
+        builder
+    } else {
+        builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.unminimize();
                 let _ = window.show();
                 let _ = window.set_focus();
             }
         }))
+    };
+    builder
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
@@ -1758,6 +1875,7 @@ pub fn run() {
             get_identity_string,
             export_identity,
             get_snapshot,
+            probe_clients,
             refresh_directory,
             take_deep_link,
             join_channel,

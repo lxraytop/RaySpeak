@@ -101,14 +101,19 @@ export function ChannelEventsModal({
 
 export function PasswordModal({
   channel,
+  error,
+  busy = false,
   onClose,
   onSubmit,
 }: {
   channel: VoiceChannel
+  error?: string | null
+  busy?: boolean
   onClose: () => void
   onSubmit: (password: string) => void
 }) {
   const [password, setPassword] = useState('')
+  const blocked = busy || !password.trim()
 
   return (
     <Modal
@@ -120,27 +125,33 @@ export function PasswordModal({
         className="password-form"
         onSubmit={(event) => {
           event.preventDefault()
+          if (blocked) return
           onSubmit(password)
         }}
       >
-        <label className="password-input">
+        <label className={`password-input ${error ? 'has-error' : ''}`}>
           <Lock size={15} strokeWidth={1.9} />
           <input
             autoFocus
             type="password"
             value={password}
-            maxLength={32}
+            maxLength={64}
             placeholder="频道密码"
+            aria-invalid={Boolean(error)}
             onChange={(event) => setPassword(event.target.value)}
           />
         </label>
-        <p className="modal-tip">当前频道已加密，密码只会用于本次加入请求。</p>
+        {error ? (
+          <p className="modal-error">{error}</p>
+        ) : (
+          <p className="modal-tip">当前频道已加密，密码只会用于本次加入请求。</p>
+        )}
         <div className="modal-actions">
           <button type="button" className="ghost-btn" onClick={onClose}>
             取消
           </button>
-          <button type="submit" className="primary-btn" disabled={!password.trim()}>
-            加入频道
+          <button type="submit" className="primary-btn" disabled={blocked}>
+            {busy ? '正在加入…' : error ? '重试加入' : '加入频道'}
           </button>
         </div>
       </form>

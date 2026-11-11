@@ -247,6 +247,8 @@ export default function App() {
   const [moveTarget, setMoveTarget] = useState<Client | null>(null)
   const [confirm, setConfirm] = useState<ConfirmState>(null)
   const [passwordChannel, setPasswordChannel] = useState<VoiceChannel | null>(null)
+  const [passwordError, setPasswordError] = useState<string | null>(null)
+  const [passwordBusy, setPasswordBusy] = useState(false)
 
   const [auth, setAuth] = useState<'login' | 'connecting' | 'ready'>(
     demoMode ? 'ready' : 'login',
@@ -1401,6 +1403,7 @@ export default function App() {
       return
     }
     if (channel.password && password === undefined) {
+      setPasswordError(null)
       setPasswordChannel(channel)
       return
     }
@@ -1410,14 +1413,51 @@ export default function App() {
         .joinChannel(channel.id, password)
         .then(() => notify(`已加入「${stripTsTags(channel.name)}」`))
         .catch((error) => {
-          notify(errorText(error))
+          const message = errorText(error)
+          notify(message)
           const self = clientsRef.current.find((client) => client.self)
           if (self) setActiveId(self.channelId)
+          // 服务器要求密码或密码错误时，重新弹出密码框重试，
+          // 避免非管理员用户被“加入失败”直接挡在门外。
+          if (message.includes('密码')) {
+            setPasswordError(message)
+            setPasswordChannel(channel)
+          }
         })
       return
     }
     moveSelf(channel)
   }
+
+  /** 带密码加入：失败时保留弹窗并显示原因，允许直接重试。 */
+  const submitChannelPassword = useCallback(
+    async (channel: VoiceChannel, password: string) => {
+      if (demoMode) {
+        setPasswordChannel(null)
+        setPasswordError(null)
+        moveSelf(channel)
+        return
+      }
+      setPasswordBusy(true)
+      setPasswordError(null)
+      try {
+        await protocol.joinChannel(channel.id, password)
+        setPasswordChannel(null)
+        setPasswordError(null)
+        setActiveId(channel.id)
+        notify(`已加入「${stripTsTags(channel.name)}」`)
+      } catch (error) {
+        const message = errorText(error)
+        setPasswordError(message)
+        notify(message)
+        const self = clientsRef.current.find((client) => client.self)
+        if (self) setActiveId(self.channelId)
+      } finally {
+        setPasswordBusy(false)
+      }
+    },
+    [demoMode, notify],
+  )
 
   const handleDeepLink = useCallback(
     (url: string) => {
@@ -2856,10 +2896,14 @@ export default function App() {
       {passwordChannel && (
         <PasswordModal
           channel={passwordChannel}
-          onClose={() => setPasswordChannel(null)}
-          onSubmit={(password) => {
-            joinChannel(passwordChannel.id, password)
+          error={passwordError}
+          busy={passwordBusy}
+          onClose={() => {
             setPasswordChannel(null)
+            setPasswordError(null)
+          }}
+          onSubmit={(password) => {
+            void submitChannelPassword(passwordChannel, password)
           }}
         />
       )}
