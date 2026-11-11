@@ -55,8 +55,8 @@ Tokio runtime。**新增任何协议命令都必须沿用此模式。**
 每 650ms：
 
 - 检查 generation、连接状态、目录是否 ready
-- 每 ~46 个 tick（约 30 秒）用 `Client::refresh_clients()` 对齐一次全服成员，
-  弥补欢迎流只下发当前频道、以及丢失 join/leave 通知的情况
+- 每 ~46 个 tick（约 30 秒）重发一次 `channelsubscribeall`，让服务器把全部频道的
+  成员重推一遍，弥补丢失的 join/leave 通知（`clientlist` 在语音连接上不可用）
 - `directory_snapshot()` → `build_snapshot()`
 - 与 `last_snapshot` 比较，变化才 emit `ts://snapshot`
 - 连接断开时 emit `ts://disconnected` 并清理 client
@@ -124,11 +124,12 @@ Rust/前端都**不得**再按 `ChannelDto.order` 数值排序。
 
 ### 成员可见性
 
-欢迎流是服务器驱动的，可能只包含落地频道的 `channelclientlist`。连接成功后
-`connect_server` 会立刻执行 `refresh_clients()`（`clientlist -uid -away -voice -groups`）
-把全服成员 upsert 进目录，随后快照循环每 ~30 秒再对齐一次；`refresh_directory`
-（刷新按钮）也会先做同样的事。这样“新号只能看到自己待过的频道成员”的问题不再出现，
-而且成员进出会随通知实时更新、以慢轮询兜底。
+语音连接（`client_type=0`）只会在欢迎流里收到落地频道的 `channelclientlist`，
+而 `clientlist`（2568）和 `servernotifyregister`（516）都被服务器拒绝——那两个能力属于
+ServerQuery 会话。真正的开关是 `channelsubscribeall`：连接成功后 `connect_server`
+立刻发一次，服务器随即补推所有频道的 `channelclientlist` / `notifycliententerview`；
+快照循环每 ~30 秒重发一次做无损重同步，`refresh_directory`（刷新按钮）同样先重订阅。
+这样“新号只能看到自己待过的频道成员”的问题不再出现，成员进出也仍然实时更新。
 
 ### 频道树层级
 

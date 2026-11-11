@@ -444,15 +444,6 @@ impl ClientInner {
     }
 
     fn handle_command_str(&mut self, s: &str, sender: &PacketSender) {
-        // 诊断开关：把服务器下行命令逐条落盘，用于确认为什么看不到其他频道成员。
-        if std::env::var_os("RAYSPEAK_TRACE").is_some() {
-            let head = s.split(' ').next().unwrap_or("");
-            if head == "error" || head.starts_with("notifyclientneededpermissions") {
-                self.logger.debug(&format!("inbound RAW {s}"), &[]);
-            } else {
-                self.logger.debug(&format!("inbound {head} len={}", s.len()), &[]);
-            }
-        }
         let mut raw_notification: Option<(String, Vec<HashMap<String, String>>)> = None;
         for row in split_command_rows(s) {
             let cmd = match parse_command(&row) {
@@ -1531,56 +1522,6 @@ impl Client {
     pub fn directory_snapshot(&self) -> Option<DirectorySnapshot> {
         let inner = self.inner.lock().unwrap();
         inner.directory_ready.then(|| inner.directory.snapshot())
-    }
-
-    /// Ask the server for the complete client list and merge it into the
-    /// directory. Returns how many rows changed.
-    ///
-    /// The welcome stream is server-driven: depending on permissions the server
-    /// may only push `channelclientlist` for the channel the client lands in,
-    /// which leaves members of every other channel invisible until the client
-    /// happens to visit them. `clientlist` is the authoritative server-wide
-    /// answer, so callers run this right after the welcome and then keep it on
-    /// a slow timer to repair any missed join/leave notification.
-    pub async fn refresh_clients(&self) -> Result<usize, Error> {
-        let rows = crate::api::list_clients(self).await?;
-        let mut changed = 0usize;
-        {
-            let mut inner = self.inner.lock().unwrap();
-            for row in rows {
-                // A row still in flight must not resurrect a client that a
-                // live `notifyclientleftview` already removed.
-                if inner.directory.client_departed(row.id) {
-                    continue;
-                }
-                if inner.directory.insert_client(row) {
-                    changed += 1;
-                }
-            }
-            if changed > 0 {
-                inner.mark_directory_changed();
-            }
-        }
-        Ok(changed)
-    }
-
-    /// Refresh per-channel flags (password protection, client limits, topic).
-    /// Returns how many rows changed.
-    pub async fn refresh_channels(&self) -> Result<usize, Error> {
-        let rows = crate::api::list_channels_with_flags(self).await?;
-        let mut changed = 0usize;
-        {
-            let mut inner = self.inner.lock().unwrap();
-            for row in rows {
-                if inner.directory.insert_channel(row) {
-                    changed += 1;
-                }
-            }
-            if changed > 0 {
-                inner.mark_directory_changed();
-            }
-        }
-        Ok(changed)
     }
 
     pub fn use_command_middleware(&self, mw: Vec<Box<dyn CommandMiddleware>>) -> &Self {

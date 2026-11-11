@@ -19,22 +19,20 @@
 
 - 欢迎流：`channellist`、`channelclientlist`、`channellistfinished` 由 crate 组装成
   `DirectoryCache`，`directory_snapshot()` 输出树。
-- **欢迎流不保证下发全服成员**：部分服务器只推当前频道的 `channelclientlist`，
-  其他频道成员要等客户端走进去才出现（表现为“新号只看到自己频道的人”）。
-  因此连接完成后主动执行一次 `clientlist -uid -away -voice -groups`，把结果
-  upsert 进目录（vendor 补丁 `Client::refresh_clients`），并在快照循环里每 ~30 秒
-  对齐一次，修复漏掉的 join/leave 通知。
-- **频道密码位同样要主动拉**：欢迎流的 `channellist` 不保证带
-  `channel_flag_password`，用 `channellist -icon -flags` 再刷一次
-  （`Client::refresh_channels`），否则加密频道不会弹密码框。
+- **欢迎流只保证落地频道的成员**：其他频道要客户端订阅整棵树后才会推过来，
+  见第 3 节 `channelsubscribeall`。`clientlist` / `channellist -flags` 在语音连接上
+  一律被拒（2568），不要试图用它们“主动拉全量”——那两条命令曾经写进过
+  `Client::refresh_clients` / `refresh_channels`，现已从 vendor 删除。
+- **频道密码位来自欢迎流的 `channellist`**（携带 `channel_flag_password`），
+  实测可用，不需要额外刷新；加密频道弹窗依赖这个标志。
 - 排序：`channel_order` **不是序号**，而是同级前一个频道的 ID（predecessor）。
   crate 的 `ordered_channels_from_index()` / `ordered_sibling_ids()` 已按该链输出；
   前端只按快照数组顺序渲染。
 - 频道父节点缺失或为 0 时是根节点；spacer 频道（`[cspacer]` 等）也属于节点，
   它同样是真实频道（可以有人、可以被进入），前端必须显示其人数与成员，
   其子节点需要按层级缩进渲染。组 ID 使用 `s<sgid>` / `c<cgid>` 前缀隔离命名空间。
-- 手动刷新：`refresh_directory` 现在会先重拉 `clientlist` 与频道 flags，再拉组与
-  codec quality，然后复用 crate 的目录缓存。
+- 手动刷新：`refresh_directory` 先重发 `channelsubscribeall`（让服务器重推全部频道
+  成员），再拉组与 codec quality，然后复用 crate 的目录缓存。
 
 ## 3. 成员可见性与事件订阅（关键）
 
