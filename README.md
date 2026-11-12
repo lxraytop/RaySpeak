@@ -64,6 +64,7 @@
 - [docs/PROTOCOL.md](docs/PROTOCOL.md) — TeamSpeak 命令/事件、头像与补丁说明
 - [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) — 环境、构建、调试、发布
 - [docs/ROADMAP.md](docs/ROADMAP.md) — 已知缺口与后续任务
+- [docs/CHANGELOG.md](docs/CHANGELOG.md) — 变更记录：成员可见性、加密频道与外观批次
 
 ## 开发
 

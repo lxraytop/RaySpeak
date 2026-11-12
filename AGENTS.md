@@ -11,9 +11,11 @@ RaySpeak 是一个 Windows 桌面 TeamSpeak 3 第三方客户端：
 - 协议层：Rust + `tsclient-rs 0.2.7`（**仓库内 vendor 了带补丁的副本**）
 - 当前版本：`0.2.0`，应用标识 `gg.rayspeak.app`
 
-已实现：真实加密握手、频道目录、成员状态、文字/私聊消息、头像、频道/服务器/组图标、
-频道文件传输、成员管理、Opus 语音收发、`ray://` 深链邀请、自定义右键菜单、主题与设置、
-成员进出提示音、房间头部在线状态与深浅色快捷键、头像与联系人目录本地持久化。
+已实现：真实加密握手、频道目录、**全服成员可见（`channelsubscribeall`）**、成员状态、
+文字/私聊消息、头像、频道/服务器/组图标、频道文件传输、成员管理、Opus 语音收发、
+`ray://` 深链邀请、自定义右键菜单、主题与设置、**加密频道加入（`cpw` 哈希）**、
+成员进出提示音、房间头部在线状态与深浅色快捷键、轮廓化外观预设与高对比模式、
+头像与联系人目录本地持久化。
 
 「共享」与「文件」的房间入口当前**暂时隐藏**（命令、弹窗与设置项都还在），
 恢复时只需在 `App.tsx` 的 `room-actions` 里放回按钮。
@@ -187,3 +189,4 @@ npm run app:build
 - [docs/PROTOCOL.md](docs/PROTOCOL.md) — TeamSpeak 命令/事件与补丁说明
 - [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) — 构建、调试、打包、维护流程
 - [docs/ROADMAP.md](docs/ROADMAP.md) — 已知缺口与建议任务
+- [docs/CHANGELOG.md](docs/CHANGELOG.md) — 变更记录（按批次：功能、协议修复、验证记录）
