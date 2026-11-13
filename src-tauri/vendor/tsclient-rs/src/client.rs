@@ -407,6 +407,7 @@ impl ClientInner {
             return;
         }
 
+        let packet_id = u16::from_be_bytes([payload[0], payload[1]]);
         let client_id = u16::from_be_bytes([payload[2], payload[3]]) as i32;
         if client_id == self.clid {
             return;
@@ -416,17 +417,16 @@ impl ClientInner {
         let data = payload[5..].to_vec();
 
         let voice_data = VoiceData {
+            packet_id,
             client_id,
             codec,
             data: bytes::Bytes::from(data),
         };
 
+        // Voice packets must stay in order: spawning a task per packet lets the
+        // runtime reorder them, which the receiver hears as clicks.
         for h in &self.event_handlers.voice_data {
-            let h = Arc::clone(h);
-            let vd = voice_data.clone();
-            tokio::spawn(async move {
-                h(Event::VoiceData(vd));
-            });
+            h(Event::VoiceData(voice_data.clone()));
         }
     }
 
@@ -808,11 +808,7 @@ impl ClientInner {
                 }
                 Event::VoiceData(data) => {
                     for h in &self.event_handlers.voice_data {
-                        let h = Arc::clone(h);
-                        let d = data.clone();
-                        tokio::spawn(async move {
-                            h(Event::VoiceData(d));
-                        });
+                        h(Event::VoiceData(data.clone()));
                     }
                 }
                 Event::Connected => {

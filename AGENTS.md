@@ -15,7 +15,8 @@ RaySpeak 是一个 Windows 桌面 TeamSpeak 3 第三方客户端：
 文字/私聊消息、头像、频道/服务器/组图标、频道文件传输、成员管理、Opus 语音收发、
 `ray://` 深链邀请、自定义右键菜单、主题与设置、**加密频道加入（`cpw` 哈希）**、
 成员进出提示音、房间头部在线状态与深浅色快捷键、轮廓化外观预设与高对比模式、
-头像与联系人目录本地持久化。
+头像与联系人目录本地持久化、**可切换的音频配置档**、**可选原生麦克风采集（Rust/WASAPI +
+SpeexDSP/RNNoise，编码后直接发包）**、麦克风诊断（`--mic-diag` / `--mic-scan`）。
 
 「共享」与「文件」的房间入口当前**暂时隐藏**（命令、弹窗与设置项都还在），
 恢复时只需在 `App.tsx` 的 `room-actions` 里放回按钮。
@@ -39,11 +40,26 @@ RaySpeak 是一个 Windows 桌面 TeamSpeak 3 第三方客户端：
 
 ```bash
 npm install
-npm run dev        # 浏览器演示模式（不连服务器）
-npm run typecheck  # 每次改 TS 必跑
-npm run app:dev    # Tauri 开发窗口
-npm run app:build  # 生产构建 + NSIS 安装包
+npm run dev         # 浏览器演示模式（不连服务器）
+npm run typecheck   # 每次改 TS 必跑
+npm run audio:check # 采集侧 DSP 自检（7 项断言，无需设备）
+npm run app:dev     # Tauri 开发窗口
+npm run app:build   # 生产构建 + NSIS 安装包
 ```
+
+`app:dev` / `app:build` 走 `scripts/tauri-run.mjs`，会从 Visual Studio Build Tools
+里找到 CMake 并设置 `CMAKE_POLICY_VERSION_MINIMUM=3.5`（libopus 的 CMakeLists 还是 3.1）。
+直接跑 `cargo check` / `cargo test` 时如果报「找不到 cmake」或「Unable to find libclang」，
+需要手动补齐两个环境变量（本机 VS 在 **F 盘**，`vswhere -latest` 解析到的是
+`Visual Studio/18/BuildTools`，只在 C 盘找会落空）：
+
+```bash
+export CMAKE="F:/Program Files (x86)/Microsoft Visual Studio/18/BuildTools/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin/cmake.exe"
+export CMAKE_POLICY_VERSION_MINIMUM=3.5
+export LIBCLANG_PATH="C:/Users/<you>/AppData/Roaming/Python/Python310/site-packages/clang/native"
+```
+
+完整工具链说明与报错处置见 [docs/PACKAGING.md](docs/PACKAGING.md)。
 
 本机 Rust 工具链位于非 C 盘，运行 Rust 命令前：
 
@@ -59,7 +75,8 @@ cd src-tauri && cargo check
 - `src-tauri/target/release/rayspeak.exe`
 - `src-tauri/target/release/bundle/nsis/RaySpeak_0.2.0_x64-setup.exe`
 
-环境基线：Node 20+（当前 20.15.0）、npm 10+、Rust 1.99、WebView2 Runtime、Windows 10/11。
+环境基线：Node 20+（当前 22.22.2）、npm 10+、Rust 1.99、CMake（VS BuildTools 自带）、
+WebView2 Runtime、Windows 10/11。
 
 ## 目录结构
 
@@ -78,6 +95,7 @@ src/
 
 src-tauri/
   src/lib.rs           Tauri 命令、Bridge、事件、快照循环、头像/图标/文件传输
+  src/audio.rs         可选原生播放引擎（cpal/WASAPI + libopus 解码 + 抖动缓冲/PLC）
   vendor/tsclient-rs/  带最小补丁的 tsclient-rs 0.2.7（见下）
   tauri.conf.json      窗口、深链 scheme、打包配置
   Cargo.toml           `[patch.crates-io]` 指向 vendor 副本
@@ -157,6 +175,36 @@ TeamSpeak 服务器
     其中 `cpw` 必须是 `base64(sha1(明文))`——语音连接的密码字段全是这个规则，发明文时
     密码正确也会回 `781 invalid channel password`（坑过一次，见 `prepare_client_password`）。
     权限不足是 `2568`，两者提示必须分开，且别把所有含 “password” 的错误都当成服务器登录密码。
+17. **播放只有 WebView 一条路径**：解码、抖动缓冲、混音、音量都在前端
+    （`useVoice.ts`），Rust 侧 `on_voice_data` 只负责把 `ts://voice` 转发给前端。
+    早期那套「WASAPI 原生播放（`nativeAudio` / 原生输出设备）」已经删除——
+    不要再加回来：它没有播放参考信号，AEC 不收敛，还额外引入设备时钟漂移。
+    设置页也不再显示「播放管线」卡片，只保留扬声器音量 / 输出设备 / 测试音。
+18. **原生采集（`nativeMic`）默认关闭，但有自动回退**：开启后 `useVoice` 不再
+    `getUserMedia`，Rust 用 SpeexDSP（`aec-rs-sys`）做 NS/AGC（**不启用 AEC**，
+    因为没有播放参考）、自建 VAD/PTT 门控与门控/RNNoise 降噪，
+    编码后由 tick 线程在 `Worker` 锁外 `Client::send_voice`。
+    采集支持任意设备采样率（`pick_input_config` 优先 48k，其次 44.1k，
+    再由 `resample_into` 线性插值拉回 48 kHz）；**时钟漂移用 ±0.5% 的重采样步进
+    伺服修正**（`trim = clamp((occupancy-target)/target*0.05, ±0.005)`），
+    不要退回「直接丢掉一整块样本」——那会造成波形断裂，听起来就是「咔哒/电流声」。
+    打不开时前端会自动回退 WebView 采集（`nativeMicActive`），不需要用户手动关开关。
+    **设备选择必须同时存 `nativeInput`**：浏览器只给 deviceId，cpal 只认设备名，
+    选择设备时要把 label 写进 `settings.nativeInput`（配置档字段），
+    Rust 找不到指定设备时**直接报错**，绝不悄悄回落到系统默认——否则用户会以为切换生效了。
+    设置页的本地测试/校准/检测/授权会自己开麦克风，先用 `onAudioTestHold`
+    让原生采集释放设备（并等 ~260ms 的 IPC + 防抖），否则两路会抢同一支麦克风。
+    构建时需要 `libclang`（bindgen），`tauri-run.mjs` 会自动探测 pip 的 `libclang.dll`。
+19. **音频配置档（`audioProfiles`）是音频设置的唯一持久化形态**：21 个音频字段
+    会即时写回当前配置档（`App.tsx` 的 `updateSettings` + `captureAudioProfile`），
+    切换配置档走 `audioProfilePatch`。新增音频设置项时必须同步加进
+    `AUDIO_PROFILE_KEYS`，否则它不会随配置档保存。
+20. **个人简介必须用 `clientedit`**：`clientupdate` 只接受昵称/静音/头像等字段，
+    传 `client_description` 不会报错但也完全不生效。正确写法是
+    `clientedit clid=<self> client_description=...`（权限
+    `b_client_modify_own_description`）。连接后先 `getClientDetails(self.clid)`
+    把服务器简介回填到设置，再以它为基线做 900ms 防抖推送；
+    不要在 `clients` 快照里做防抖（每 650ms 会重置计时器）。
 
 ## 当前状态与已知缺口
 
@@ -172,7 +220,8 @@ TeamSpeak 服务器
 
 ```bash
 npm run typecheck
-cd src-tauri && cargo check
+npm run audio:check
+cd src-tauri && cargo test --lib && cargo check
 npm run app:build
 ```
 
@@ -188,5 +237,6 @@ npm run app:build
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — 模块、状态、数据流
 - [docs/PROTOCOL.md](docs/PROTOCOL.md) — TeamSpeak 命令/事件与补丁说明
 - [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) — 构建、调试、打包、维护流程
+- [docs/PACKAGING.md](docs/PACKAGING.md) — 打包步骤、工具链依赖与常见报错
 - [docs/ROADMAP.md](docs/ROADMAP.md) — 已知缺口与建议任务
 - [docs/CHANGELOG.md](docs/CHANGELOG.md) — 变更记录（按批次：功能、协议修复、验证记录）

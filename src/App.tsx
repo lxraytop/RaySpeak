@@ -48,8 +48,14 @@ import type {
   VoiceChannel,
 } from './types'
 import {
+  AUDIO_PROFILE_KEYS,
   applySettings,
+  audioProfilePatch,
+  captureAudioProfile,
   defaultSettings,
+  effectiveNoiseSuppressor,
+  effectiveVadThreshold,
+  ensureProfiles,
   isDark,
   loadSettings,
   saveSettings,
@@ -293,6 +299,10 @@ export default function App() {
   const [unread, setUnread] = useState<Record<string, number>>({})
   const [refreshing, setRefreshing] = useState(false)
   const [pttHeld, setPttHeld] = useState(false)
+  // 原生采集失败后本次会话退回浏览器采集；开关或设备变化时重新尝试。
+  const [nativeMicDown, setNativeMicDown] = useState(false)
+  // 设置页在本地测试/校准/设备检测时会自己打开麦克风，这里先让原生采集释放设备。
+  const [nativeTestHold, setNativeTestHold] = useState(false)
   const connectedRef = useRef(connected)
   connectedRef.current = connected
   const activeIdRef = useRef(activeId)
@@ -324,6 +334,8 @@ export default function App() {
   >([])
   const savedVolumesRef = useRef<VolumeState>(loadVolumes())
   const joinToneAt = useRef(0)
+  // 服务器上「我的个人简介」的最新已知值；null 表示本次连接还没拿到。
+  const descSyncedRef = useRef<string | null>(null)
   const [deviceLabels, setDeviceLabels] = useState<Record<string, string>>({})
 
   useEffect(() => {
@@ -515,12 +527,17 @@ export default function App() {
       const mover = movers[Math.floor(Math.random() * movers.length)]
       const dest = voiceChannels[Math.floor(Math.random() * voiceChannels.length)]
       if (!dest || mover.channelId === dest.id) return
+      const myChannelId = clientsRef.current.find((client) => client.self)?.channelId
       setClients((prev) =>
         prev.map((client) =>
           client.id === mover.id ? { ...client, channelId: dest.id, connectedAt: '刚刚' } : client,
         ),
       )
-      if (settingsRef.current.joinLeaveSound && !settingsRef.current.dnd) {
+      if (
+        dest.id === myChannelId &&
+        settingsRef.current.joinLeaveSound &&
+        !settingsRef.current.dnd
+      ) {
         playJoinLeaveTone('join')
       }
     }, 7000)
@@ -530,7 +547,20 @@ export default function App() {
   const notify = useCallback((message: string) => setToast(message), [])
 
   const updateSettings = useCallback((patch: Partial<Settings>) => {
-    setSettings((prev) => ({ ...prev, ...patch }))
+    setSettings((prev) => {
+      const next = { ...prev, ...patch }
+      // 音频字段改动即时写回当前配置档，用户切换配置时看到的就是最后调好的状态。
+      if ('audioProfiles' in patch) return next
+      if (!AUDIO_PROFILE_KEYS.some((key) => key in patch)) return next
+      return {
+        ...next,
+        audioProfiles: next.audioProfiles.map((profile) =>
+          profile.id === next.activeProfileId
+            ? captureAudioProfile(next, profile.id, profile.name)
+            : profile,
+        ),
+      }
+    })
   }, [])
 
   const applyClientDetails = useCallback((clid: number, payload: ClientDetailsDto) => {
@@ -575,30 +605,46 @@ export default function App() {
       const channelName = (id: string) =>
         stripTsTags(nextChannels.find((channel) => channel.id === id)?.name ?? '') ||
         '频道'
-      let joins = 0
-      let leaves = 0
+      // 只在「自己所在频道」有人进出时提醒：其它频道的流动不打扰用户。
+      const myChannelId = snapshot.clients.find((client) => client.isSelf)?.channelId
+      let entrants = 0
+      let leavers = 0
       const lines: string[] = []
       for (const client of snapshot.clients) {
         const name = client.isSelf ? '你' : stripTsTags(client.name) || '成员'
         const old = previous.get(client.clid)
+        if (client.isSelf) {
+          if (old && old.channelId !== client.channelId) {
+            lines.push(`你加入了「${channelName(client.channelId)}」`)
+          }
+          continue
+        }
         if (!old) {
-          if (client.isSelf) continue
-          joins += 1
-          lines.push(`${name} 加入了服务器`)
-        } else if (old.channelId !== client.channelId) {
-          joins += 1
-          lines.push(
-            client.isSelf
-              ? `你加入了「${channelName(client.channelId)}」`
-              : `${name} 加入了「${channelName(client.channelId)}」`,
-          )
+          if (myChannelId && client.channelId === myChannelId) {
+            entrants += 1
+            lines.push(`${name} 进入了「${channelName(client.channelId)}」`)
+          }
+          continue
+        }
+        if (old.channelId === client.channelId) continue
+        if (client.channelId === myChannelId) {
+          entrants += 1
+          lines.push(`${name} 进入了「${channelName(client.channelId)}」`)
+        } else if (old.channelId === myChannelId) {
+          leavers += 1
+          lines.push(`${name} 离开了「${channelName(old.channelId)}」`)
         }
       }
       for (const old of clientsRef.current) {
         if (typeof old.clid !== 'number') continue
-        if (!incoming.has(old.clid)) {
-          leaves += 1
-          lines.push(old.self ? '你已离开服务器' : `${stripTsTags(old.name) || '成员'} 离开了服务器`)
+        if (incoming.has(old.clid)) continue
+        if (old.self) {
+          lines.push('你已离开服务器')
+          continue
+        }
+        if (myChannelId && old.channelId === myChannelId) {
+          leavers += 1
+          lines.push(`${stripTsTags(old.name) || '成员'} 离开了服务器`)
         }
       }
       if (lines.length > 0 && config.notifyJoinLeave) {
@@ -611,12 +657,12 @@ export default function App() {
           })),
         ])
       }
-      if (config.joinLeaveSound && !config.dnd && joins + leaves > 0) {
+      if (config.joinLeaveSound && !config.dnd && entrants + leavers > 0) {
         // 大频道连续进出时最多每 900ms 响一次，避免提示音连成一片
         const now = Date.now()
         if (now - joinToneAt.current > 900) {
           joinToneAt.current = now
-          playJoinLeaveTone(leaves > joins ? 'leave' : 'join')
+          playJoinLeaveTone(leavers > entrants ? 'leave' : 'join')
         }
       }
     }
@@ -777,9 +823,14 @@ export default function App() {
                 clientDetailsRef.current[self.clid] = payload
                 applyClientDetails(self.clid, payload)
                 // 服务器上的个人简介是权威值：连上后即回填，避免本地默认文案覆盖服务器内容
+                const serverDesc = (payload.description ?? '').trim()
+                descSyncedRef.current = serverDesc
                 setSettings((prev) => ({ ...prev, description: payload.description ?? '' }))
               })
-              .catch(() => {})
+              .catch(() => {
+                // 拿不到服务器简介时以本地值为基线，后续编辑仍然可以推送
+                descSyncedRef.current = settingsRef.current.description.trim()
+              })
           }
         } catch (error) {
           setConnected(false)
@@ -825,6 +876,7 @@ export default function App() {
     setServerIcon('')
     serverIconRequested.current = 0
     avatarRequests.current.clear()
+    descSyncedRef.current = null
   }, [])
 
   useEffect(() => {
@@ -1388,9 +1440,6 @@ export default function App() {
       prev.map((client) => (client.self ? { ...client, channelId: channel.id } : client)),
     )
     setActiveId(channel.id)
-    if (settingsRef.current.joinLeaveSound && !settingsRef.current.dnd) {
-      playJoinLeaveTone('join')
-    }
     notify(`已加入「${stripTsTags(channel.name)}」`)
   }
 
@@ -1998,19 +2047,21 @@ export default function App() {
 
   useEffect(() => {
     if (demoMode || !connected) return
-    const self = clients.find((client) => client.self)
-    if (!self) return
     const wantedName = settings.nickname.trim()
     const wantedDesc = settings.description.trim()
-    const currentName = stripTsTags(self.name).trim()
-    const currentDesc = (self.description ?? '').trim()
-    const nameChanged = Boolean(wantedName) && wantedName !== currentName
-    const descChanged = wantedDesc !== currentDesc
-    if (!nameChanged && !descChanged) return
     const timer = window.setTimeout(() => {
+      const self = clientsRef.current.find((client) => client.self)
+      if (!self) return
+      const currentName = stripTsTags(self.name).trim()
+      const nameChanged = Boolean(wantedName) && wantedName !== currentName
+      // 以连接时读到的服务器简介为基线：没拿到之前不推送，避免本地默认文案覆盖服务器。
+      const descChanged =
+        descSyncedRef.current !== null && wantedDesc !== descSyncedRef.current
+      if (!nameChanged && !descChanged) return
       protocol
         .updateSelf(nameChanged ? wantedName : null, descChanged ? wantedDesc : null)
         .then(() => {
+          if (descChanged) descSyncedRef.current = wantedDesc
           setClients((prev) =>
             prev.map((client) =>
               client.self
@@ -2023,10 +2074,10 @@ export default function App() {
             ),
           )
         })
-        .catch(() => {})
-    }, 800)
+        .catch((error) => notify(`资料同步失败：${errorText(error)}`))
+    }, 900)
     return () => window.clearTimeout(timer)
-  }, [demoMode, connected, clients, settings.nickname, settings.description])
+  }, [demoMode, connected, settings.nickname, settings.description, notify])
 
   const markRemoteTalking = useCallback((clid: number, talking: boolean) => {
     setClients((prev) => {
@@ -2044,32 +2095,43 @@ export default function App() {
     })
   }, [])
 
+  // 原生采集失败过一次后，切换开关或输入设备时重新尝试。
+  useEffect(() => {
+    setNativeMicDown(false)
+  }, [settings.nativeMic, settings.inputDevice, settings.nativeInput])
+  const nativeMicActive = settings.nativeMic && !nativeMicDown
+
   const audioConfig = {
-    inputDevice: settings.inputDevice,
-    outputDevice: settings.outputDevice,
+    inputDevice: settings.inputDevice,    outputDevice: settings.outputDevice,
     inputVolume: settings.inputVolume,
     outputVolume: settings.outputVolume,
     echoCancel: settings.echoCancel,
-    noiseSuppress: settings.noiseSuppress,
+    noiseSuppressor: effectiveNoiseSuppressor(settings),
+    highPass: settings.highPass,
+    gateDepth: settings.gateDepth,
     autoGain: settings.autoGain,
     inputMode: settings.inputMode,
+    inputSensitivity: settings.inputSensitivity,
+    noiseFloorDb: settings.noiseFloorDb,
+    voiceHoldMs: settings.voiceHoldMs,
     vadThreshold: settings.vadThreshold,
     pttHeld,
     musicMode: settings.musicMode,
     bitrate: settings.bitrate,
     frameSize: settings.frameSize,
-    stereo: settings.stereo,
+    stereo: settings.musicMode,
     jitterBuffer: settings.jitterBuffer,
     latencyMode: settings.latencyMode,
+    nativeMic: nativeMicActive,
   }
   const captureKey = [
     settings.inputDevice,
     settings.echoCancel,
-    settings.noiseSuppress,
+    settings.noiseSuppressor,
     settings.autoGain,
     settings.frameSize,
-    settings.stereo,
     settings.musicMode,
+    nativeMicActive,
   ].join('|')
 
   const voiceClients = useMemo(
@@ -2081,6 +2143,124 @@ export default function App() {
       ),
     [clients, settings.blocked],
   )
+  const audioMicNotice = useRef(false)
+
+  useEffect(() => {
+    if (!isTauri) return
+    const timer = window.setTimeout(() => {
+      void protocol
+        .applyNativeAudio({
+          // 原生采集按 cpal 设备名选择：选择设备时已把名字存进 nativeInput，
+          // 旧配置没有该字段时回退到浏览器 label。
+          micEnabled: connected && !demoMode && nativeMicActive && !nativeTestHold,
+          // 优先用选择设备时同步保存的 cpal 名字；旧配置回退到浏览器 label 映射。
+          inputDevice:
+            settings.nativeInput ||
+            (settings.inputDevice ? deviceLabels[settings.inputDevice] : '') ||
+            null,
+          inputVolume: Math.max(0, Math.min(2, settings.inputVolume / 100)),
+          inputMuted: muted,
+          inputMode: settings.inputMode,
+          vadThreshold: effectiveVadThreshold(settings),
+          voiceHoldMs: settings.voiceHoldMs,
+          musicMode: settings.musicMode,
+          bitrate: settings.bitrate,
+          frameSize: settings.frameSize,
+          stereo: settings.musicMode,
+          noiseSuppressor: effectiveNoiseSuppressor(settings),
+          highPass: settings.highPass,
+          gateDepth: settings.gateDepth,
+          autoGain: settings.autoGain,
+        })
+        .catch(() => {})
+    }, 120)
+    return () => window.clearTimeout(timer)
+  }, [
+    connected,
+    demoMode,
+    nativeMicActive,
+    nativeTestHold,
+    deviceLabels,
+    settings.inputDevice,
+    settings.nativeInput,
+    settings.inputVolume,
+    settings.inputMode,
+    settings.vadThreshold,
+    settings.inputSensitivity,
+    settings.noiseFloorDb,
+    settings.voiceHoldMs,
+    settings.musicMode,
+    settings.bitrate,
+    settings.frameSize,
+    settings.noiseSuppressor,
+    settings.highPass,
+    settings.gateDepth,
+    settings.autoGain,
+    muted,
+  ])
+
+  useEffect(() => {
+    if (!isTauri) return
+    void protocol.setNativePtt(pttHeld).catch(() => {})
+  }, [pttHeld, settings.nativeMic])
+
+  useEffect(() => {
+    if (!isTauri) return
+    let off: (() => void) | undefined
+    let disposed = false
+    void listenEvent<{ mic?: boolean; error?: string | null }>(
+      'ts://audio-engine',
+      (event) => {
+        if (!event.error || !event.mic) return
+        // 原生采集打不开（设备非 48k/被独占/权限）：本次会话退回浏览器采集，
+        // 否则前端完全不采集，表现就是「全静音」。
+        setNativeMicDown(true)
+        if (audioMicNotice.current) return
+        audioMicNotice.current = true
+        notify(`原生麦克风不可用，已回退浏览器采集：${event.error}`)
+      },
+    ).then((remove) => {
+      if (disposed) remove()
+      else off = remove
+    })
+    return () => {
+      disposed = true
+      off?.()
+    }
+  }, [notify])
+
+  useEffect(() => {
+    if (!isTauri) return
+    let off: (() => void) | undefined
+    let disposed = false
+    void listenEvent<{ talking: boolean }>('ts://mic-activity', (event) => {
+      if (settings.nativeMic) markSelfTalking(event.talking)
+    }).then((remove) => {
+      if (disposed) remove()
+      else off = remove
+    })
+    return () => {
+      disposed = true
+      off?.()
+    }
+  }, [markSelfTalking, settings.nativeMic])
+
+  useEffect(() => {
+    if (!isTauri) return
+    let off: (() => void) | undefined
+    let disposed = false
+    void listenEvent<{ clientId: number; talking: boolean }>(
+      'ts://voice-activity',
+      (event) => markRemoteTalking(event.clientId, event.talking),
+    ).then((remove) => {
+      if (disposed) remove()
+      else off = remove
+    })
+    return () => {
+      disposed = true
+      off?.()
+    }
+  }, [markRemoteTalking])
 
   useVoice({
     enabled: connected && !demoMode,
@@ -2243,7 +2423,15 @@ export default function App() {
   }, [applySnapshot, demoMode, notify, refreshing])
 
   const resetSettings = () => {
-    setSettings({ ...defaultSettings, hotkeys: { ...defaultSettings.hotkeys }, blocked: [] })
+    setSettings(
+      ensureProfiles({
+        ...defaultSettings,
+        hotkeys: { ...defaultSettings.hotkeys },
+        blocked: [],
+        audioProfiles: [],
+        activeProfileId: '',
+      }),
+    )
     notify('已恢复默认设置')
   }
 
@@ -2548,6 +2736,7 @@ export default function App() {
               serverIcon={serverIcon}
               showIcons={settings.showChannelIcons}
               onCreate={() => setModal('create')}
+              onSelect={setActiveId}
               onJoin={joinChannel}
               onSelectClient={openProfile}
               onRefresh={refreshSnapshot}
@@ -2746,6 +2935,12 @@ export default function App() {
                   settings.bitrate
                 }kbps · ${connected ? `${latency}ms` : '--'}`}
                 layout={settings.layout}
+                profiles={settings.audioProfiles}
+                activeProfileId={settings.activeProfileId}
+                onProfile={(id) => {
+                  const profile = settings.audioProfiles.find((item) => item.id === id)
+                  if (profile) updateSettings({ ...audioProfilePatch(profile), activeProfileId: id })
+                }}
                 onToggleMute={toggleMute}
                 onToggleDeafen={toggleDeafen}
                 onOpenSettings={() => openSettings('audio')}
@@ -2768,6 +2963,7 @@ export default function App() {
           demoMode={demoMode}
           onSection={setSettingsSection}
           onChange={updateSettings}
+          onAudioTestHold={setNativeTestHold}
           onReset={resetSettings}
           onClose={() => setPage(settingsReturn)}
           onToast={notify}

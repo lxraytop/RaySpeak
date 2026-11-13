@@ -67,7 +67,6 @@ export function MemberCard({
       {client.self ? (
         <div className="mc-self-note">
           <span className="mc-device">{client.device === 'mobile' ? '手机端在线' : '桌面端在线'}</span>
-          <span className="mc-self-hint">这是你 · 可在设置中修改昵称</span>
         </div>
       ) : (
         <VolumeControl

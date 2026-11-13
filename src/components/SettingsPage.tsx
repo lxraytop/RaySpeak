@@ -10,6 +10,7 @@ import {
   Keyboard,
   LayoutGrid,
   LockKeyhole,
+  Mic,
   Monitor,
   Moon,
   Palette,
@@ -22,19 +23,36 @@ import {
   Sparkles,
   Sun,
   Trash2,
+  Volume2,
   X,
 } from 'lucide-react'
 import type { Client } from '../types'
 import {
   accentPresets,
+  activeProcessPreset,
+  audioProfilePatch,
+  autoVadThreshold,
   backgroundPresets,
   defaultSettings,
+  effectiveNoiseSuppressor,
+  effectiveVadThreshold,
   isDark,
+  newProfileId,
+  noiseSuppressors,
   safeImage,
+  voiceProcessPresets,
+  type AudioProfile,
   type Settings,
 } from '../settings'
 import { groupMap } from '../data/mock'
-import { protocol, errorText, pickSavePath } from '../protocol'
+import { CAPTURE_PROCESSOR, CAPTURE_WORKLET_SOURCE } from '../audio/captureWorklet'
+import {
+  errorText,
+  listenEvent,
+  pickSavePath,
+  protocol,
+  type NativeAudioStats,
+} from '../protocol'
 import {
   ensureNotifyPermission,
   playNotifyTone,
@@ -73,6 +91,7 @@ interface Props {
   demoMode: boolean
   onSection: (section: SettingsSection) => void
   onChange: (patch: Partial<Settings>) => void
+  onAudioTestHold?: (active: boolean) => void
   onReset: () => void
   onClose: () => void
   onToast: (message: string) => void
@@ -173,8 +192,69 @@ const appearancePresets: Array<{
   },
 ]
 
-function AboutRow({ label, value }: { label: string; value: ReactNode }) {
+const METER_FLOOR_DB = -60
+
+function dbToPercent(db: number) {
+  return Math.max(0, Math.min(100, ((db - METER_FLOOR_DB) / -METER_FLOOR_DB) * 100))
+}
+
+/**
+ * 参考 TeamSpeak 3 / Discord 的输入电平条：实时电平 + 门限刻度 + 底噪标记，
+ * 用户能直接看出「说话时有没有越过阈值」。
+ */
+function LevelMeter({
+  db,
+  threshold,
+  floor,
+  auto,
+}: {
+  db: number | null
+  threshold: number
+  floor: number | null
+  auto: boolean
+}) {
+  const open = db !== null && db >= threshold
   return (
+    <div className="level-meter">
+      <div className="level-track">
+        <div
+          className="level-fill"
+          style={{ width: `${db === null ? 0 : dbToPercent(db)}%` }}
+        />
+        <div
+          className="level-peak"
+          style={{ left: `${dbToPercent(threshold)}%` }}
+          title={`发送阈值 ${threshold} dBFS`}
+        />
+        {floor !== null && (
+          <div
+            className="level-floor"
+            style={{ left: `${dbToPercent(floor)}%` }}
+            title={`环境底噪 ${floor.toFixed(0)} dBFS`}
+          />
+        )}
+      </div>
+      <div className="level-scale">
+        <span>−60</span>
+        <span>−40</span>
+        <span>−20</span>
+        <span>0 dBFS</span>
+      </div>
+      <div className="level-readout">
+        <span className={open ? 'on' : ''}>
+          {db === null ? '未在采集' : `${db.toFixed(0)} dBFS · ${open ? '发送中' : '静音'}`}
+        </span>
+        <span>
+          阈值 {threshold} dBFS
+          {auto ? ' · 自动' : ''}
+          {floor !== null ? ` · 底噪 ${floor.toFixed(0)} dBFS` : ''}
+        </span>
+      </div>
+    </div>
+  )
+}
+
+function AboutRow({ label, value }: { label: string; value: ReactNode }) {  return (
     <div className="about-row">
       <span>{label}</span>
       <strong>{value}</strong>
@@ -192,17 +272,31 @@ export function SettingsPage({
   demoMode,
   onSection,
   onChange,
+  onAudioTestHold,
   onReset,
   onClose,
   onToast,
 }: Props) {
   const [testing, setTesting] = useState(false)
-  const [micLevel, setMicLevel] = useState(0)
+  const [probing, setProbing] = useState(false)
+  const [probeRows, setProbeRows] = useState<
+    Array<{ device: string; hasSignal: boolean; rmsDbfs: number; peakDbfs: number }>
+  >([])
+  const [testDb, setTestDb] = useState<number | null>(null)
+  const [liveDb, setLiveDb] = useState<number | null>(null)
+  const [liveThreshold, setLiveThreshold] = useState<number | null>(null)
+  const [liveFloor, setLiveFloor] = useState<number | null>(null)
+  const [monitor, setMonitor] = useState(false)
+  const [calibrating, setCalibrating] = useState(false)
+  const [granting, setGranting] = useState(false)
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([])
   const [deviceNote, setDeviceNote] = useState(
     '点击「刷新设备」授予麦克风权限后可显示完整设备名称',
   )
   const [appInfo, setAppInfo] = useState<{ version: string; dataDir: string } | null>(null)
+  const [nativeStats, setNativeStats] = useState<NativeAudioStats | null>(null)
+  const [renaming, setRenaming] = useState(false)
+  const [profileName, setProfileName] = useState('')
 
   useEffect(() => {
     if (demoMode) return
@@ -215,7 +309,7 @@ export function SettingsPage({
   const enumerateDevices = useCallback(async () => {
     if (!navigator.mediaDevices?.enumerateDevices) {
       setDeviceNote('当前系统不支持音频设备枚举')
-      return
+      return []
     }
     try {
       const list = await navigator.mediaDevices.enumerateDevices()
@@ -225,51 +319,153 @@ export function SettingsPage({
       } else {
         setDeviceNote(`已找到 ${list.filter((d) => d.kind !== 'videoinput').length} 个音频设备`)
       }
+      return list
     } catch {
       setDeviceNote('无法读取音频设备列表')
+      return []
     }
   }, [])
 
   useEffect(() => {
     if (section !== 'audio') return
-    void enumerateDevices()
+    let disposed = false
+    void (async () => {
+      const list = await enumerateDevices()
+      // 原生采集按设备名工作；如果从未授权过，label 全空，选择会退化成系统默认。
+      // 只在开启原生采集时自动授权一次，避免普通用户莫名弹出麦克风权限。
+      const noLabels = list.length > 0 && list.every((device) => !device.label)
+      if (!disposed && noLabels && settings.nativeMic) await refreshDevices()
+    })()
     const handler = () => void enumerateDevices()
     navigator.mediaDevices?.addEventListener?.('devicechange', handler)
-    return () => navigator.mediaDevices?.removeEventListener?.('devicechange', handler)
-  }, [section, enumerateDevices])
+    return () => {
+      disposed = true
+      navigator.mediaDevices?.removeEventListener?.('devicechange', handler)
+    }
+  }, [section, enumerateDevices, settings.nativeMic])
 
-  const refreshDevices = async () => {
+  const refreshDevices = async (): Promise<MediaDeviceInfo[]> => {
+    setGranting(true)
     try {
+      // 授权时会短暂打开默认麦克风：先让原生采集释放设备。
+      await waitForNativeRelease()
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
       stream.getTracks().forEach((track) => track.stop())
     } catch {
       onToast('麦克风权限被拒绝，仅能显示默认设备')
+    } finally {
+      setGranting(false)
     }
-    await enumerateDevices()
+    return enumerateDevices()
+  }
+
+  /**
+   * 选择输入设备时同时记录 cpal 设备名（`nativeInput`）。
+   * 浏览器只给 deviceId，原生采集只认名字；两者必须在选择瞬间绑定，
+   * 否则没授权、拿不到 label 时原生采集会悄悄回落到系统默认设备。
+   */
+  const pickInputDevice = async (value: string) => {
+    if (!value) {
+      onChange({ inputDevice: '', nativeInput: '' })
+      return
+    }
+    let label = devices.find((device) => device.deviceId === value)?.label ?? ''
+    if (!label) {
+      const list = await refreshDevices()
+      label = list.find((device) => device.deviceId === value)?.label ?? ''
+    }
+    if (!label && settings.nativeMic) {
+      onToast('未读到设备名称，原生采集会继续使用系统默认麦克风')
+    }
+    onChange({ inputDevice: value, nativeInput: label })
+  }
+
+  const probeDevices = async () => {
+    if (demoMode) {
+      onToast('演示模式无法访问真实麦克风')
+      return
+    }
+    setProbing(true)
+    try {
+      await waitForNativeRelease()
+      const raw = await protocol.probeMicDevices()
+      const parsed = JSON.parse(raw) as {
+        devices: Array<{ device: string; hasSignal: boolean; rmsDbfs: number; peakDbfs: number }>
+      }
+      setProbeRows(parsed.devices)
+      const dead = parsed.devices.filter((row) => !row.hasSignal)
+      if (dead.length === parsed.devices.length) {
+        onToast('所有输入设备都没有信号：检查系统麦克风权限或耳机物理静音开关')
+      } else if (dead.some((row) => row.device === inputOptions.find((o) => o.value === settings.inputDevice)?.label)) {
+        onToast('当前选择的麦克风没有信号，建议改选下面有信号的设备')
+      }
+    } catch {
+      onToast('检测失败，无法打开输入设备')
+    } finally {
+      setProbing(false)
+    }
+  }
+
+  useEffect(() => {
+    if (section !== 'audio' || demoMode || !settings.nativeMic) {
+      setNativeStats(null)
+      return
+    }
+    let disposed = false
+    const pull = () => {
+      protocol
+        .nativeAudioStats()
+        .then((stats) => {
+          if (!disposed) setNativeStats(stats)
+        })
+        .catch(() => {})
+    }
+    pull()
+    const timer = window.setInterval(pull, 1000)
+    return () => {
+      disposed = true
+      window.clearInterval(timer)
+    }
+  }, [section, settings.nativeMic, demoMode])
+
+  // 本地测试 / 校准 / 设备检测会自己打开麦克风：先让原生采集释放设备，
+  // 否则两个采集流会抢同一支麦克风（原生侧报设备占用，界面又自动回退）。
+  // 这个 effect 必须排在采集 effect 之前，保证同一次提交里先请求释放。
+  useEffect(() => {
+    onAudioTestHold?.(testing || calibrating || probing || granting)
+  }, [testing, calibrating, probing, granting, onAudioTestHold])
+  useEffect(() => () => onAudioTestHold?.(false), [onAudioTestHold])
+
+  /** 原生采集关闭需要一次 IPC 往返 + 120ms 防抖，开麦前等一下。 */
+  const waitForNativeRelease = async () => {
+    if (!settings.nativeMic) return
+    await new Promise((resolve) => window.setTimeout(resolve, 260))
   }
 
   useEffect(() => {
     if (!testing) {
-      setMicLevel(0)
+      setTestDb(null)
       return
     }
     let disposed = false
     let stream: MediaStream | null = null
     let context: AudioContext | null = null
-    let frame = 0
+    let node: AudioWorkletNode | null = null
+
     const run = async () => {
       try {
+        await waitForNativeRelease()
         const constraints: MediaStreamConstraints = {
           audio: settings.inputDevice
             ? {
                 deviceId: { exact: settings.inputDevice },
                 echoCancellation: settings.echoCancel,
-                noiseSuppression: settings.noiseSuppress,
+                noiseSuppression: settings.noiseSuppressor === 'chromium',
                 autoGainControl: settings.autoGain,
               }
             : {
                 echoCancellation: settings.echoCancel,
-                noiseSuppression: settings.noiseSuppress,
+                noiseSuppression: settings.noiseSuppressor === 'chromium',
                 autoGainControl: settings.autoGain,
               },
           video: false,
@@ -279,27 +475,59 @@ export function SettingsPage({
           stream.getTracks().forEach((track) => track.stop())
           return
         }
-        context = new AudioContext()
+        try {
+          context = new AudioContext({ sampleRate: 48000, latencyHint: 'interactive' })
+        } catch {
+          context = new AudioContext({ latencyHint: 'interactive' })
+        }
+        // getUserMedia/await 之后用户手势已过期，自动播放策略会把新建的
+        // AudioContext 停在 suspended —— 不自听就没声音。
+        if (context.state === 'suspended') {
+          await context.resume().catch(() => {})
+        }
+        // 试听与诊断都走和真实发送完全相同的 AudioWorklet 链路，
+        // 否则「关掉降噪后的底噪」与真正发出去的信号不是一回事。
+        const moduleUrl = URL.createObjectURL(
+          new Blob([CAPTURE_WORKLET_SOURCE], { type: 'application/javascript' }),
+        )
+        await context.audioWorklet.addModule(moduleUrl)
+        URL.revokeObjectURL(moduleUrl)
+        const sink = context as AudioContext & { setSinkId?: (id: string) => Promise<void> }
+        if (sink.setSinkId) await sink.setSinkId(settings.outputDevice || '').catch(() => {})
         const source = context.createMediaStreamSource(stream)
         const gain = context.createGain()
         gain.gain.value = Math.max(0, Math.min(2, settings.inputVolume / 100))
-        const analyser = context.createAnalyser()
-        analyser.fftSize = 512
+        node = new AudioWorkletNode(context, CAPTURE_PROCESSOR, {
+          processorOptions: {
+            frameSize: Math.round(((context.sampleRate || 48000) * settings.frameSize) / 1000),
+            channels: 1,
+            highPass: settings.highPass,
+            gateEnabled: settings.noiseSuppressor === 'gate',
+            gateThresholdDb: effectiveVadThreshold(settings),
+            gateDepthDb: settings.gateDepth,
+          },
+        })
         source.connect(gain)
-        gain.connect(analyser)
-        const data = new Uint8Array(analyser.fftSize)
-        const tick = () => {
+        gain.connect(node)
+        // 自听：听到的是「处理之后、即将发送」的信号。
+        // 无论开关如何都要连到 destination，否则 worklet 不被拉取、电平条不动；
+        // 关掉时用增益 0 静音（createGain() 默认是 1，会把麦克风一直放出来）。
+        const listen = context.createGain()
+        listen.gain.value = monitor ? 1 : 0
+        node.connect(listen).connect(context.destination)
+        node.port.onmessage = (event: MessageEvent) => {
           if (disposed) return
-          analyser.getByteTimeDomainData(data)
-          let energy = 0
-          for (let index = 0; index < data.length; index += 1) {
-            const value = (data[index] - 128) / 128
-            energy += value * value
+          const payload = event.data as {
+            frame: ArrayBuffer
+            frames: number
+            levelDb: number
           }
-          setMicLevel(Math.min(1, Math.sqrt(energy / data.length) * 3))
-          frame = requestAnimationFrame(tick)
+          setTestDb(
+            Number.isFinite(payload.levelDb)
+              ? Math.max(-90, Math.min(0, payload.levelDb))
+              : -90,
+          )
         }
-        tick()
       } catch {
         onToast('无法打开麦克风，请检查设备与系统权限')
         setTesting(false)
@@ -308,23 +536,157 @@ export function SettingsPage({
     void run()
     return () => {
       disposed = true
-      cancelAnimationFrame(frame)
+      node?.port.postMessage({ type: 'params' })
+      node?.disconnect()
       stream?.getTracks().forEach((track) => track.stop())
       if (context) void context.close()
     }
   }, [
     testing,
+    monitor,
     settings.inputDevice,
+    settings.outputDevice,
     settings.inputVolume,
     settings.echoCancel,
-    settings.noiseSuppress,
+    settings.noiseSuppressor,
+    settings.highPass,
+    settings.gateDepth,
+    settings.frameSize,
+    settings.inputSensitivity,
+    settings.noiseFloorDb,
+    settings.vadThreshold,
     settings.autoGain,
     onToast,
   ])
 
+  // 已连接时优先显示真实链路的电平与阈值（AudioWorklet 上报），
+  // 未连接或原生采集时退回本地测试 / 原生统计。
+  useEffect(() => {
+    if (section !== 'audio' || !connected || demoMode || settings.nativeMic) {
+      setLiveDb(null)
+      setLiveThreshold(null)
+      setLiveFloor(null)
+      return
+    }
+    const handler = (event: Event) => {
+      const detail = (
+        event as CustomEvent<{ db?: number; thresholdDb?: number; floorDb?: number }>
+      ).detail
+      if (!detail || typeof detail.db !== 'number') return
+      setLiveDb(detail.db)
+      if (typeof detail.thresholdDb === 'number') setLiveThreshold(detail.thresholdDb)
+      if (typeof detail.floorDb === 'number') setLiveFloor(detail.floorDb)
+    }
+    window.addEventListener('rayspeak:level', handler)
+    return () => window.removeEventListener('rayspeak:level', handler)
+  }, [section, connected, demoMode, settings.nativeMic])
+
+  useEffect(() => {
+    if (section !== 'audio' || demoMode || !settings.nativeMic) return
+    let off: (() => void) | undefined
+    let disposed = false
+    void listenEvent<{ talking: boolean; levelDb: number }>('ts://mic-activity', (event) => {
+      setLiveDb(Math.max(-90, Math.min(0, event.levelDb)))
+    }).then((remove) => {
+      if (disposed) remove()
+      else off = remove
+    })
+    return () => {
+      disposed = true
+      off?.()
+    }
+  }, [section, demoMode, settings.nativeMic])
+
+  const calibrateInput = async () => {
+    if (calibrating) return
+    setCalibrating(true)
+    await waitForNativeRelease()
+    let stream: MediaStream | null = null
+    let context: AudioContext | null = null
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: settings.inputDevice ? { deviceId: { exact: settings.inputDevice } } : true,
+        video: false,
+      })
+      context = new AudioContext()
+      const analyser = context.createAnalyser()
+      analyser.fftSize = 1024
+      context.createMediaStreamSource(stream).connect(analyser)
+      const data = new Uint8Array(analyser.fftSize)
+      const samples: number[] = []
+      const started = performance.now()
+      await new Promise<void>((resolve) => {
+        const tick = () => {
+          analyser.getByteTimeDomainData(data)
+          let energy = 0
+          for (let index = 0; index < data.length; index += 1) {
+            const value = (data[index] - 128) / 128
+            energy += value * value
+          }
+          const db = 20 * Math.log10(Math.max(Math.sqrt(energy / data.length), 1e-6))
+          if (db > -89) samples.push(db)
+          if (performance.now() - started < 1800) requestAnimationFrame(tick)
+          else resolve()
+        }
+        tick()
+      })
+      // 取 20% 分位而不是最小值：偶尔一帧绝对静音不会把底噪压死。
+      samples.sort((a, b) => a - b)
+      const picked = samples.length ? samples[Math.floor(samples.length * 0.2)] : -60
+      const floorDb = Math.max(-90, Math.min(-30, Math.round(picked)))
+      onChange({ noiseFloorDb: floorDb, inputSensitivity: 'auto' })
+      onToast(`环境底噪约 ${floorDb} dBFS，发送阈值已设为 ${autoVadThreshold(floorDb)} dBFS`)
+    } catch {
+      onToast('校准失败：请授予麦克风权限后重试')
+    } finally {
+      stream?.getTracks().forEach((track) => track.stop())
+      if (context) void context.close()
+      setCalibrating(false)
+    }
+  }
+
+  const playTestTone = async () => {
+    let context: AudioContext | null = null
+    try {
+      context = new AudioContext()
+      const sink = context as AudioContext & { setSinkId?: (id: string) => Promise<void> }
+      if (sink.setSinkId) await sink.setSinkId(settings.outputDevice || '').catch(() => {})
+      const ctx = context
+      const master = ctx.createGain()
+      master.gain.value = Math.max(0, Math.min(1, settings.outputVolume / 100)) * 0.3
+      master.connect(ctx.destination)
+      const now = ctx.currentTime
+      for (const [index, freq] of [523.25, 659.25, 783.99].entries()) {
+        const start = now + index * 0.22
+        const osc = ctx.createOscillator()
+        osc.type = 'sine'
+        osc.frequency.value = freq
+        const env = ctx.createGain()
+        env.gain.setValueAtTime(0, start)
+        env.gain.linearRampToValueAtTime(1, start + 0.02)
+        env.gain.exponentialRampToValueAtTime(0.001, start + 0.2)
+        osc.connect(env)
+        env.connect(master)
+        osc.start(start)
+        osc.stop(start + 0.22)
+      }
+      window.setTimeout(() => void ctx.close(), 1400)
+      onToast('已在所选扬声器播放测试音')
+    } catch {
+      onToast('无法播放测试音，请检查输出设备')
+    }
+  }
+
   const deviceOptions = (kind: MediaDeviceKind) => {
+    const seen = new Set<string>()
     const inputs = devices
-      .filter((device) => device.kind === kind)
+      .filter((device) => {
+        if (device.kind !== kind) return false
+        // 未授权时 deviceId 可能全是空串，去重避免出现多个不可区分的选项。
+        if (seen.has(device.deviceId)) return false
+        seen.add(device.deviceId)
+        return true
+      })
       .map((device, index) => ({
         value: device.deviceId,
         label: device.label || `${kind === 'audioinput' ? '麦克风' : '扬声器'} ${index + 1}`,
@@ -471,6 +833,59 @@ export function SettingsPage({
       : names.some((name) => permissions.includes(name))
     return [label, granted ? 'granted' : 'denied'] as const
   })
+
+  // 电平条数据源：测试中优先本地测试（此时原生采集被临时暂停，事件会停更），
+  // 否则已连接优先真实链路，未连接退回本地测试。
+  const meterDb = testing ? testDb : liveDb ?? testDb
+  const meterThreshold = liveThreshold ?? effectiveVadThreshold(settings)
+  const meterFloor =
+    settings.inputSensitivity === 'auto' ? (liveFloor ?? settings.noiseFloorDb) : null
+  const presetId = activeProcessPreset(settings)
+  const activeSuppressor =
+    noiseSuppressors.find((item) => item.id === settings.noiseSuppressor) ?? noiseSuppressors[2]
+  const effectiveSuppressor = effectiveNoiseSuppressor(settings)
+  const effectiveLabel =
+    noiseSuppressors.find((item) => item.id === effectiveSuppressor)?.name ?? '关闭'
+
+  const activeProfile =
+    settings.audioProfiles.find((profile) => profile.id === settings.activeProfileId) ??
+    settings.audioProfiles[0]
+
+  const switchProfile = (id: string) => {
+    const profile = settings.audioProfiles.find((item) => item.id === id)
+    if (!profile) return
+    setRenaming(false)
+    onChange({ ...audioProfilePatch(profile), activeProfileId: profile.id })
+  }
+
+  const duplicateProfile = () => {
+    if (!activeProfile) return
+    const copy: AudioProfile = {
+      ...activeProfile,
+      id: newProfileId(),
+      name: `${activeProfile.name} 副本`,
+    }
+    onChange({ audioProfiles: [...settings.audioProfiles, copy], activeProfileId: copy.id })
+    onToast(`已保存为「${copy.name}」，可原地改名`)
+  }
+
+  const deleteProfile = () => {
+    if (!activeProfile || settings.audioProfiles.length <= 1) return
+    const rest = settings.audioProfiles.filter((item) => item.id !== activeProfile.id)
+    setRenaming(false)
+    onChange({
+      audioProfiles: rest,
+      activeProfileId: rest[0].id,
+      ...audioProfilePatch(rest[0]),
+    })
+    onToast(`已删除「${activeProfile.name}」，切换到「${rest[0].name}」`)
+  }
+
+  const qualityPreset = settings.musicMode
+    ? 'music'
+    : settings.bitrate === 64 && settings.frameSize === 20
+      ? 'voice'
+      : 'custom'
 
   return (
     <div className="settings-screen">
@@ -659,19 +1074,88 @@ export function SettingsPage({
 
           {section === 'audio' && (
             <>
-              <SetCard title="设备" desc="读取系统音频设备，切换后立即重连采集">
-                <SettingRow title="麦克风" desc="用于语音采集，浏览器将请求设备权限">
+              <SetCard
+                title="配置档"
+                desc="保存多套音频配置（会议 / 游戏 / 音乐 / 外放），换场景一键切换；修改会即时写回当前配置"
+              >
+                <SettingRow
+                  title="当前配置"
+                  desc="切换会立即应用设备、增益、处理与编码参数"
+                  vertical
+                >
+                  <div className="profile-row">
+                    <Select
+                      value={settings.activeProfileId}
+                      options={settings.audioProfiles.map((profile) => ({
+                        value: profile.id,
+                        label: profile.name,
+                      }))}
+                      onChange={switchProfile}
+                    />
+                    <button className="small-btn" onClick={duplicateProfile}>
+                      <Plus size={13} strokeWidth={2} />
+                      另存为
+                    </button>
+                    <button
+                      className="small-btn"
+                      onClick={() => {
+                        setRenaming(true)
+                        setProfileName(activeProfile?.name ?? '')
+                      }}
+                    >
+                      重命名
+                    </button>
+                    <button
+                      className="small-btn"
+                      onClick={deleteProfile}
+                      disabled={settings.audioProfiles.length <= 1}
+                      title={
+                        settings.audioProfiles.length <= 1 ? '至少保留一套配置' : '删除当前配置'
+                      }
+                    >
+                      <Trash2 size={13} strokeWidth={2} />
+                      删除
+                    </button>
+                  </div>
+                </SettingRow>
+                {renaming && (
+                  <div className="inline-actions">
+                    <TextInput
+                      value={profileName}
+                      onChange={setProfileName}
+                      placeholder="配置名称，例如「游戏 · 耳机」"
+                    />
+                    <button
+                      className="small-btn"
+                      onClick={() => {
+                        if (activeProfile && profileName.trim()) {
+                          onChange({
+                            audioProfiles: settings.audioProfiles.map((profile) =>
+                              profile.id === activeProfile.id
+                                ? { ...profile, name: profileName.trim() }
+                                : profile,
+                            ),
+                          })
+                        }
+                        setRenaming(false)
+                      }}
+                    >
+                      <Check size={13} strokeWidth={2} />
+                      确定
+                    </button>
+                  </div>
+                )}
+              </SetCard>
+
+              <SetCard title="麦克风" desc="设备、原生采集与输入检测">
+                <SettingRow
+                  title="设备"
+                  desc="切换后立即重连采集；原生采集使用同一支麦克风"
+                >
                   <Select
                     value={settings.inputDevice}
                     options={inputOptions}
-                    onChange={(value) => onChange({ inputDevice: value })}
-                  />
-                </SettingRow>
-                <SettingRow title="扬声器" desc="语音播放设备，切换后立即生效">
-                  <Select
-                    value={settings.outputDevice}
-                    options={outputOptions}
-                    onChange={(value) => onChange({ outputDevice: value })}
+                    onChange={(value) => void pickInputDevice(value)}
                   />
                 </SettingRow>
                 <div className="inline-actions">
@@ -679,12 +1163,78 @@ export function SettingsPage({
                     <RotateCcw size={13} strokeWidth={2} />
                     刷新设备
                   </button>
+                  <button
+                    className="small-btn"
+                    onClick={() => void probeDevices()}
+                    disabled={probing}
+                  >
+                    <Mic size={13} strokeWidth={2} />
+                    {probing ? '检测中…' : '检测输入'}
+                  </button>
                   <span className="set-note">{deviceNote}</span>
                 </div>
+                {probeRows.length > 0 && (
+                  <div className="probe-list">
+                    {probeRows.map((row) => {
+                      const match = inputOptions.find(
+                        (option) =>
+                          option.label === row.device || option.label.includes(row.device),
+                      )
+                      return (
+                        <div className="probe-row" key={row.device}>
+                          <span className={row.hasSignal ? 'probe-ok' : 'probe-dead'} />
+                          <span className="probe-name">{row.device}</span>
+                          <span className="probe-level">
+                            {row.hasSignal ? `${row.rmsDbfs.toFixed(0)} dBFS` : '无信号'}
+                          </span>
+                          {!row.hasSignal && match && (
+                            <span className="probe-hint">静音或不可用</span>
+                          )}
+                          {row.hasSignal && match && match.value !== settings.inputDevice && (
+                            <button
+                              className="small-btn"
+                              onClick={() =>
+                                onChange({ inputDevice: match.value, nativeInput: row.device })
+                              }
+                            >
+                              改用此设备
+                            </button>
+                          )}
+                        </div>
+                      )
+                    })}
+                    <p className="set-note">
+                      每个设备打开 0.8 秒；无信号通常是系统未授权、耳机物理静音开关，
+                      或被其他程序独占。
+                    </p>
+                  </div>
+                )}
+                {settings.nativeMic && (
+                  <p className="set-note">
+                    原生采集按设备名打开麦克风；本地测试、自听与「检测输入」会临时暂停原生采集，
+                    结束后自动恢复，避免两个采集流抢同一支设备。
+                  </p>
+                )}
+                <SettingRow
+                  title="原生采集（实验性）"
+                  desc="Rust 直接采集并编码，支持 SpeexDSP / RNNoise 降噪"
+                >
+                  <Switch
+                    checked={settings.nativeMic}
+                    onChange={(value) => onChange({ nativeMic: value })}
+                  />
+                </SettingRow>
+                <p className="set-note">
+                  原生采集无法提供回声消除（缺少播放参考信号）；外放场景建议关闭它，
+                  使用 WebView 链路 + 智能降噪。开启后若设备打不开会自动回退。
+                </p>
               </SetCard>
 
-              <SetCard title="音量" desc="输入增益对应 getUserMedia 采集，输出音量影响所有远端语音">
-                <SettingRow title="麦克风增益" desc="过高的增益会引入底噪">
+              <SetCard
+                title="音量与监听"
+                desc="本地测试与自听都走真实发送链路（高通 → 降噪 → 门控 → 限幅）"
+              >
+                <SettingRow title="麦克风增益" desc="过高会引入底噪，建议先校准底噪再微调">
                   <Slider
                     value={settings.inputVolume}
                     min={0}
@@ -693,35 +1243,60 @@ export function SettingsPage({
                     onChange={(value) => onChange({ inputVolume: value })}
                   />
                 </SettingRow>
-                <div className={`mic-meter ${testing ? 'real' : ''}`} aria-hidden="true">
-                  {Array.from({ length: 24 }).map((_, index) => (
-                    <i
-                      key={index}
-                      style={
-                        testing
-                          ? {
-                              height: `${
-                                4 +
-                                micLevel *
-                                  26 *
-                                  (0.45 + 0.55 * Math.abs(Math.sin(index * 1.3)))
-                              }px`,
-                              opacity: micLevel * 24 > index ? 1 : 0.16,
-                            }
-                          : undefined
-                      }
-                    />
-                  ))}
-                  <button className="mic-test" onClick={() => setTesting((value) => !value)}>
-                    <Play size={12} strokeWidth={2.2} />
-                    {testing ? '停止测试' : '测试麦克风'}
+                <LevelMeter
+                  db={meterDb}
+                  threshold={meterThreshold}
+                  floor={meterFloor}
+                  auto={settings.inputSensitivity === 'auto'}
+                />
+                <div className="inline-actions">
+                  <button className="small-btn" onClick={() => setTesting((value) => !value)}>
+                    <Play size={13} strokeWidth={2} />
+                    {testing ? '停止本地测试' : '本地测试'}
                   </button>
+                  <button
+                    className="small-btn"
+                    onClick={() => void calibrateInput()}
+                    disabled={calibrating}
+                  >
+                    <Mic size={13} strokeWidth={2} />
+                    {calibrating ? '校准中…' : '校准底噪'}
+                  </button>
+                  <span className="set-note">
+                    {connected ? '已连接：电平来自实时链路' : '未连接：电平来自本地测试'}
+                  </span>
                 </div>
                 <p className="set-note">
-                  {testing
-                    ? '正在显示当前麦克风的实时电平，松开按钮停止。'
-                    : '点击测试可直接打开所选麦克风并查看实时电平。'}
+                  「校准底噪」会在安静环境采集 1.8 秒，取 20% 分位电平作为环境底噪
+                  （当前 {settings.noiseFloorDb} dBFS），自动阈值 = 底噪 + 9 dB
+                  （{autoVadThreshold(settings.noiseFloorDb)} dBFS）。
                 </p>
+                {testing && liveDb === null && testDb !== null && testDb < -60 && (
+                  <p className="set-note warn">
+                    当前麦克风几乎没有信号（{testDb.toFixed(0)} dBFS）。请点上方「检测输入」
+                    确认设备，或检查系统麦克风权限与耳机静音开关。
+                  </p>
+                )}
+                <SettingRow
+                  title="自听（本地监听）"
+                  desc="回放「处理后、即将发送」的声音，建议戴耳机以免啸叫"
+                >
+                  <Switch
+                    checked={monitor}
+                    onChange={(value) => {
+                      setMonitor(value)
+                      if (value) setTesting(true)
+                    }}
+                  />
+                </SettingRow>
+                <p className="set-note">
+                  原生采集开启时，本地测试与自听会临时暂停原生采集（结束后自动恢复）；
+                  默认输出若是 FxSound 等虚拟增强设备，其自身音效会干扰判断，
+                  试听时请直接选耳机/扬声器的物理设备。
+                </p>
+              </SetCard>
+
+              <SetCard title="扬声器" desc="本机播放音量与设备自检">
                 <SettingRow title="扬声器音量" desc="仅影响本机播放，不改变他人音量">
                   <Slider
                     value={settings.outputVolume}
@@ -731,6 +1306,20 @@ export function SettingsPage({
                     onChange={(value) => onChange({ outputVolume: value })}
                   />
                 </SettingRow>
+                <SettingRow title="输出设备" desc="留空跟随系统默认">
+                  <Select
+                    value={settings.outputDevice}
+                    options={outputOptions}
+                    onChange={(value) => onChange({ outputDevice: value })}
+                  />
+                </SettingRow>
+                <div className="inline-actions">
+                  <button className="small-btn" onClick={() => void playTestTone()}>
+                    <Volume2 size={13} strokeWidth={2} />
+                    测试扬声器
+                  </button>
+                  <span className="set-note">三段测试音走所选输出设备，用于确认声道与音量</span>
+                </div>
               </SetCard>
 
               <SetCard title="输入方式" desc="VAD 自动检测人声，PTT 按下按键才发送">
@@ -740,22 +1329,51 @@ export function SettingsPage({
                     options={[
                       { value: 'vad', label: '自动检测' },
                       { value: 'ptt', label: '按键说话' },
+                      { value: 'open', label: '常开' },
                     ]}
                     onChange={(value) => onChange({ inputMode: value })}
                   />
                 </SettingRow>
-                {settings.inputMode === 'vad' ? (
-                  <SettingRow title="触发阈值" desc="低于阈值的环境音将被忽略，单位 dBFS">
-                    <Slider
-                      value={settings.vadThreshold}
-                      min={-60}
-                      max={-10}
-                      step={1}
-                      suffix=" dB"
-                      onChange={(value) => onChange({ vadThreshold: value })}
-                    />
-                  </SettingRow>
-                ) : (
+                {settings.inputMode === 'vad' && (
+                  <>
+                    <SettingRow
+                      title="灵敏度"
+                      desc="自动模式按环境底噪推导阈值，说话时阈值不会跟着人声爬升"
+                    >
+                      <Segmented
+                        value={settings.inputSensitivity}
+                        options={[
+                          { value: 'auto', label: '自动' },
+                          { value: 'manual', label: '手动' },
+                        ]}
+                        onChange={(value) => onChange({ inputSensitivity: value })}
+                      />
+                    </SettingRow>
+                    {settings.inputSensitivity === 'manual' && (
+                      <SettingRow title="触发阈值" desc="低于阈值的环境音将被忽略，单位 dBFS">
+                        <Slider
+                          value={settings.vadThreshold}
+                          min={-60}
+                          max={-10}
+                          step={1}
+                          suffix=" dB"
+                          onChange={(value) => onChange({ vadThreshold: value })}
+                        />
+                      </SettingRow>
+                    )}
+                    <SettingRow title="保持时长" desc="说完后继续发送的时间，太短会切掉尾音">
+                      <Slider
+                        value={settings.voiceHoldMs}
+                        min={100}
+                        max={1000}
+                        step={50}
+                        suffix=" ms"
+                        onChange={(value) => onChange({ voiceHoldMs: value })}
+                      />
+                    </SettingRow>
+                  </>
+                )}
+                {settings.inputMode === 'ptt' && (
                   <SettingRow title="按键" desc="按住该键时发送语音，松开停止">
                     <HotkeyInput
                       value={settings.hotkeys.ptt}
@@ -765,34 +1383,112 @@ export function SettingsPage({
                     />
                   </SettingRow>
                 )}
+                {settings.inputMode === 'open' && (
+                  <p className="set-note">
+                    常开模式下只要未静音就会持续发送，适合音乐或直播；
+                    建议同时绑定静音热键，避免环境音全程外泄。
+                  </p>
+                )}
               </SetCard>
 
-              <SetCard title="语音处理" desc="WebView2 采集参数，可显著改善回声与键盘噪声">
-                <SettingRow title="回声消除" desc="扬声器外放时抑制回流">
-                  <Switch
-                    checked={settings.echoCancel}
-                    onChange={(value) => onChange({ echoCancel: value })}
+              <SetCard
+                title="语音处理"
+                desc="预设对应 TeamSpeak 3 的 DSP 预设；改动任一项即视为自定义"
+              >
+                <div className="audio-chips">
+                  {voiceProcessPresets.map((preset) => (
+                    <button
+                      key={preset.id}
+                      className={`audio-chip ${presetId === preset.id ? 'active' : ''}`}
+                      title={preset.desc}
+                      onClick={() => onChange(preset.patch)}
+                    >
+                      {preset.name}
+                    </button>
+                  ))}
+                  <span className={`audio-chip ${presetId === 'custom' ? 'active' : ''}`}>
+                    自定义
+                  </span>
+                </div>
+                <SettingRow title="降噪方式" desc={activeSuppressor.desc}>
+                  <Select
+                    value={settings.noiseSuppressor}
+                    options={noiseSuppressors.map((item) => ({
+                      value: item.id,
+                      label: `${item.name} · ${item.short}`,
+                    }))}
+                    onChange={(value) =>
+                      onChange({ noiseSuppressor: value as Settings['noiseSuppressor'] })
+                    }
                   />
                 </SettingRow>
-                <SettingRow title="噪声抑制" desc="压低风扇、键盘与空调噪声">
+                <p className="set-note">
+                  当前实际生效：{effectiveLabel}
+                  {activeSuppressor.path === 'native' && !settings.nativeMic
+                    ? '（该方式需要原生采集，已降级为噪声门）'
+                    : ''}
+                </p>
+                {effectiveSuppressor === 'gate' && (
+                  <SettingRow
+                    title="门的深度"
+                    desc="低于阈值时压暗多少 dB，越大越安静但更易听出断点"
+                  >
+                    <Slider
+                      value={settings.gateDepth}
+                      min={6}
+                      max={36}
+                      step={2}
+                      suffix=" dB"
+                      onChange={(value) => onChange({ gateDepth: value })}
+                    />
+                  </SettingRow>
+                )}
+                <SettingRow
+                  title="高通滤波"
+                  desc="80 Hz 以下整体切除，去掉桌面震动、空调与手持噪声"
+                >
                   <Switch
-                    checked={settings.noiseSuppress}
-                    onChange={(value) => onChange({ noiseSuppress: value })}
+                    checked={settings.highPass}
+                    onChange={(value) => onChange({ highPass: value })}
                   />
                 </SettingRow>
-                <SettingRow title="自动增益" desc="自动拉平音量差异">
+                <SettingRow title="自动增益" desc="自动拉平音量差异，开播前建议关掉做手动校准">
                   <Switch
                     checked={settings.autoGain}
                     onChange={(value) => onChange({ autoGain: value })}
                   />
                 </SettingRow>
+                <SettingRow
+                  title="回声消除"
+                  desc={
+                    settings.nativeMic
+                      ? '原生采集无播放参考，关闭后由系统/耳机自带的回声抑制负责'
+                      : '扬声器外放时抑制回流（WebView 采集链路生效）'
+                  }
+                >
+                  <Switch
+                    checked={settings.echoCancel}
+                    onChange={(value) => onChange({ echoCancel: value })}
+                  />
+                </SettingRow>
               </SetCard>
 
-              <SetCard title="编码质量" desc="对应 Opus 编码器参数，音乐模式将启用立体声">
-                <SettingRow title="音乐模式" desc="高码率、立体声，适合放歌或看片">
-                  <Switch
-                    checked={settings.musicMode}
-                    onChange={(value) => onChange({ musicMode: value })}
+              <SetCard title="编码与网络" desc="上行质量与抗抖动；一般保持默认即可">
+                <SettingRow title="质量" desc="语音最省带宽，音乐模式启用立体声与更高码率">
+                  <Segmented
+                    value={qualityPreset}
+                    options={[
+                      { value: 'voice', label: '语音' },
+                      { value: 'music', label: '音乐' },
+                      { value: 'custom', label: '自定义' },
+                    ]}
+                    onChange={(value) => {
+                      if (value === 'voice') {
+                        onChange({ musicMode: false, bitrate: 64, frameSize: 20 })
+                      } else if (value === 'music') {
+                        onChange({ musicMode: true, bitrate: 96, frameSize: 20 })
+                      }
+                    }}
                   />
                 </SettingRow>
                 <SettingRow title="语音码率" desc="上行带宽占用，频道上限以服务器为准">
@@ -817,12 +1513,6 @@ export function SettingsPage({
                     onChange={(value) => onChange({ frameSize: Number(value) })}
                   />
                 </SettingRow>
-                <SettingRow title="立体声" desc="仅音乐模式推荐开启">
-                  <Switch
-                    checked={settings.stereo}
-                    onChange={(value) => onChange({ stereo: value })}
-                  />
-                </SettingRow>
                 <SettingRow title="抖动缓冲" desc="网络波动大时增大缓冲以减少断音">
                   <Slider
                     value={settings.jitterBuffer}
@@ -845,6 +1535,49 @@ export function SettingsPage({
                   />
                 </SettingRow>
               </SetCard>
+
+              {settings.nativeMic && (
+                <SetCard
+                  title="采集诊断"
+                  desc="仅原生采集开启时上报；用于判断设备与链路是否稳定"
+                >
+                  <div className="perm-row">
+                    <span>采集引擎</span>
+                    <span
+                      className={`status-chip ${nativeStats?.micActive ? 'online' : 'unsupported'}`}
+                    >
+                      {nativeStats ? (nativeStats.micActive ? '运行中' : '未启动') : '等待连接'}
+                    </span>
+                  </div>
+                  <div className="perm-row">
+                    <span>输入设备</span>
+                    <strong>{nativeStats?.micDevice ?? '系统默认'}</strong>
+                  </div>
+                  <div className="perm-row">
+                    <span>设备采样率</span>
+                    <strong>{nativeStats?.micRate ? `${nativeStats.micRate} Hz` : '—'}</strong>
+                  </div>
+                  <div className="perm-row">
+                    <span>输入电平 / 发送门</span>
+                    <strong>
+                      {nativeStats
+                        ? `${nativeStats.micLevelDb.toFixed(0)} dBFS · ${nativeStats.micGate ? '开' : '关'}`
+                        : '—'}
+                    </strong>
+                  </div>
+                  <div className="perm-row">
+                    <span>已发送帧 / 输入溢出</span>
+                    <strong>
+                      {nativeStats
+                        ? `${nativeStats.micFrames} / ${nativeStats.micOverruns}`
+                        : '—'}
+                    </strong>
+                  </div>
+                  <p className="set-note">
+                    输入溢出持续增长说明采集回调跟不上 10ms 节奏，可换更低的设备采样率或关闭原生采集。
+                  </p>
+                </SetCard>
+              )}
             </>
           )}
 
@@ -1358,8 +2091,11 @@ export function SettingsPage({
                 </div>
               </SetCard>
 
-              <SetCard title="频道提醒" desc="成员进出频道时写入本地聊天记录，并可播放提示音">
-                <SettingRow title="成员进出提醒" desc="在消息区显示加入/离开/移动记录">
+              <SetCard
+                title="频道提醒"
+                desc="只关注你自己所在频道：有人进来或离开时记录并提示，其它频道不打扰"
+              >
+                <SettingRow title="成员进出提醒" desc="在消息区记录你所在频道的进出">
                   <Switch
                     checked={settings.notifyJoinLeave}
                     onChange={(value) => onChange({ notifyJoinLeave: value })}
@@ -1367,7 +2103,7 @@ export function SettingsPage({
                 </SettingRow>
                 <SettingRow
                   title="进出提示音"
-                  desc="有人（包括你自己）进出频道时播放短提示音，勿扰模式下自动静音"
+                  desc="有人进出你所在频道时播放短提示音，勿扰模式下自动静音"
                 >
                   <Switch
                     checked={settings.joinLeaveSound}

@@ -6,6 +6,91 @@ import type {
   ThemeMode,
 } from './types'
 
+export type NoiseSuppressor = 'off' | 'gate' | 'chromium' | 'speex' | 'rnnoise'
+
+/**
+ * 一套完整的音频配置。用户可保存多套并按场景切换（开会 / 游戏 / 音乐 / 外放）。
+ * 切换配置只是把这里的字段写回 Settings 的扁平字段，引擎读取的仍是扁平值，
+ * 因此不存在「配置与实际生效不一致」的问题。
+ */
+export interface AudioProfile {
+  id: string
+  name: string
+  inputDevice: string
+  // 原生采集（cpal/WASAPI）只认设备名，与浏览器的 deviceId 是两个命名空间。
+  // 选择设备时同步写这里，避免运行期再依赖浏览器是否已授权拿到 label。
+  nativeInput: string
+  outputDevice: string
+  inputVolume: number
+  outputVolume: number
+  inputMode: 'vad' | 'ptt' | 'open'
+  inputSensitivity: 'auto' | 'manual'
+  noiseFloorDb: number
+  voiceHoldMs: number
+  vadThreshold: number
+  echoCancel: boolean
+  noiseSuppressor: NoiseSuppressor
+  highPass: boolean
+  gateDepth: number
+  autoGain: boolean
+  nativeMic: boolean
+  musicMode: boolean
+  bitrate: number
+  frameSize: number
+  jitterBuffer: number
+  latencyMode: 'low' | 'balanced' | 'stable'
+}
+
+export const AUDIO_PROFILE_KEYS: Array<keyof AudioProfile> = [
+  'inputDevice',
+  'nativeInput',
+  'outputDevice',
+  'inputVolume',
+  'outputVolume',
+  'inputMode',
+  'inputSensitivity',
+  'noiseFloorDb',
+  'voiceHoldMs',
+  'vadThreshold',
+  'echoCancel',
+  'noiseSuppressor',
+  'highPass',
+  'gateDepth',
+  'autoGain',
+  'nativeMic',
+  'musicMode',
+  'bitrate',
+  'frameSize',
+  'jitterBuffer',
+  'latencyMode',
+]
+
+export function captureAudioProfile(
+  settings: Settings,
+  id: string,
+  name: string,
+): AudioProfile {
+  const profile = { id, name } as AudioProfile
+  const source = settings as unknown as Record<string, unknown>
+  for (const key of AUDIO_PROFILE_KEYS) {
+    // 两边字段同名同型，逐键拷贝即可
+    ;(profile as unknown as Record<string, unknown>)[key] = source[key]
+  }
+  return profile
+}
+
+export function audioProfilePatch(profile: AudioProfile): Partial<Settings> {
+  const patch: Partial<Settings> = {}
+  for (const key of AUDIO_PROFILE_KEYS) {
+    ;(patch as Record<string, unknown>)[key] = profile[key]
+  }
+  return patch
+}
+
+export function newProfileId() {
+  return `p${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`
+}
+
 export interface Settings {
   nickname: string
   description: string
@@ -31,20 +116,28 @@ export interface Settings {
   showGroupChips: boolean
   showChannelCounts: boolean
   inputDevice: string
+  nativeInput: string
   outputDevice: string
   inputVolume: number
   outputVolume: number
-  inputMode: 'vad' | 'ptt'
+  inputMode: 'vad' | 'ptt' | 'open'
+  inputSensitivity: 'auto' | 'manual'
+  noiseFloorDb: number
+  voiceHoldMs: number
   vadThreshold: number
   echoCancel: boolean
-  noiseSuppress: boolean
+  noiseSuppressor: NoiseSuppressor
+  highPass: boolean
+  gateDepth: number
   autoGain: boolean
+  nativeMic: boolean
   musicMode: boolean
   bitrate: number
   frameSize: number
-  stereo: boolean
   jitterBuffer: number
   latencyMode: 'low' | 'balanced' | 'stable'
+  audioProfiles: AudioProfile[]
+  activeProfileId: string
   hotkeys: {
     ptt: string
     mute: string
@@ -146,20 +239,28 @@ export const defaultSettings: Settings = {
   showGroupChips: true,
   showChannelCounts: true,
   inputDevice: '',
+  nativeInput: '',
   outputDevice: '',
   inputVolume: 100,
   outputVolume: 100,
   inputMode: 'vad',
+  inputSensitivity: 'auto',
+  noiseFloorDb: -60,
+  voiceHoldMs: 300,
   vadThreshold: -45,
   echoCancel: true,
-  noiseSuppress: true,
-  autoGain: false,
+  noiseSuppressor: 'chromium',
+  highPass: true,
+  gateDepth: 18,
+  autoGain: true,
+  nativeMic: false,
   musicMode: false,
   bitrate: 64,
   frameSize: 20,
-  stereo: false,
   jitterBuffer: 80,
   latencyMode: 'balanced',
+  audioProfiles: [],
+  activeProfileId: '',
   hotkeys: {
     ptt: 'V',
     mute: 'Ctrl+Shift+M',
@@ -189,6 +290,7 @@ export const defaultSettings: Settings = {
 const STORAGE_KEY = 'rayspeak.settings.v2'
 const DEFAULTS_KEY = 'rayspeak.settings.defaults'
 
+
 /**
  * 旧版本里明显不合理的默认值。升级时只把「仍然等于旧默认值」的字段换成新默认值，
  * 用户手动改过的配置保持不变。
@@ -201,8 +303,9 @@ const LEGACY_DEFAULTS: Partial<Record<keyof Settings, unknown>> = {
   timeout: 15,
   blur: 18,
   backgroundDim: 40,
+  autoGain: false,
 }
-const DEFAULTS_VERSION = '2'
+const DEFAULTS_VERSION = '3'
 
 function migrateDefaults(parsed: Partial<Settings>): Partial<Settings> {
   try {
@@ -221,24 +324,195 @@ function migrateDefaults(parsed: Partial<Settings>): Partial<Settings> {
   return next
 }
 
+/**
+ * 语音处理预设：参考 TeamSpeak 3 的 DSP 预设与 Discord 的三开关组合，
+ * 预设只写入开关本身，不额外保存状态，用户改任一开关即视为「自定义」。
+ */
+export const voiceProcessPresets: Array<{
+  id: 'off' | 'light' | 'standard' | 'music'
+  name: string
+  desc: string
+  patch: Partial<Settings>
+}> = [
+  {
+    id: 'off',
+    name: '关闭',
+    desc: '不做任何处理，延迟最低',
+    patch: { echoCancel: false, noiseSuppressor: 'off', autoGain: false, musicMode: false },
+  },
+  {
+    id: 'light',
+    name: '轻度',
+    desc: '只消回声，保留环境声',
+    patch: { echoCancel: true, noiseSuppressor: 'off', autoGain: false, musicMode: false },
+  },
+  {
+    id: 'standard',
+    name: '标准',
+    desc: '回声消除 + 降噪 + 自动增益',
+    patch: { echoCancel: true, noiseSuppressor: 'chromium', autoGain: true, musicMode: false },
+  },
+  {
+    id: 'music',
+    name: '音乐',
+    desc: '关处理，立体声高码率',
+    patch: {
+      echoCancel: false,
+      noiseSuppressor: 'off',
+      autoGain: false,
+      musicMode: true,
+      bitrate: 96,
+    },
+  },
+]
+
+/**
+ * 降噪方式元数据。`path` 说明该方式在哪种采集链路下真正生效：
+ * WebView 只能用 Chromium 内置 NS 与噪声门；SpeexDSP / RNNoise 需要原生采集。
+ */
+export const noiseSuppressors: Array<{
+  id: NoiseSuppressor
+  name: string
+  short: string
+  desc: string
+  path: 'webview' | 'native'
+}> = [
+  {
+    id: 'off',
+    name: '关闭',
+    short: '不做降噪',
+    desc: '保留原始环境声，适合外接声卡且环境安静的场景',
+    path: 'webview',
+  },
+  {
+    id: 'gate',
+    name: '噪声门',
+    short: '轻量 · 低延迟',
+    desc: '低于阈值的底噪整体压暗，几乎不增加延迟，对键盘、风扇有效',
+    path: 'webview',
+  },
+  {
+    id: 'chromium',
+    name: '智能降噪',
+    short: 'WebView 内置 · 通用',
+    desc: 'Chromium 的谱减降噪，日常通话最稳，CPU 占用低',
+    path: 'webview',
+  },
+  {
+    id: 'speex',
+    name: 'SpeexDSP',
+    short: '原生 · 强度可控',
+    desc: 'Mumble 同源的谱减降噪，稳态噪声抑制更强，需开启原生麦克风',
+    path: 'native',
+  },
+  {
+    id: 'rnnoise',
+    name: 'RNNoise',
+    short: '原生 · 神经网络',
+    desc: 'Xiph 的循环神经网络降噪，对人声保留更好，需开启原生麦克风',
+    path: 'native',
+  },
+]
+
+export function effectiveNoiseSuppressor(settings: Settings) {
+  if (settings.nativeMic) return settings.noiseSuppressor
+  // WebView 链路只有 Chromium 与噪声门两种能力，其余降级为噪声门。
+  return settings.noiseSuppressor === 'speex' || settings.noiseSuppressor === 'rnnoise'
+    ? 'gate'
+    : settings.noiseSuppressor
+}
+
+export function activeProcessPreset(settings: Settings) {
+  const match = voiceProcessPresets.find(
+    (preset) =>
+      (preset.patch.echoCancel ?? false) === !!settings.echoCancel &&
+      (preset.patch.noiseSuppressor ?? 'off') === settings.noiseSuppressor &&
+      (preset.patch.autoGain ?? false) === !!settings.autoGain &&
+      (preset.patch.musicMode ?? false) === !!settings.musicMode,
+  )
+  return match?.id ?? 'custom'
+}
+
+/**
+ * 自动灵敏度：以环境底噪为基准上浮固定余量，并夹在可用区间内。
+ * 与 Discord「自动输入灵敏度」、Mumble 的噪声底噪估计思路一致。
+ */
+export function autoVadThreshold(noiseFloorDb: number) {
+  const floor = Number.isFinite(noiseFloorDb) ? noiseFloorDb : -60
+  return Math.max(-60, Math.min(-20, Math.round(floor + 9)))
+}
+
+export function effectiveVadThreshold(settings: Settings) {
+  return settings.inputSensitivity === 'auto'
+    ? autoVadThreshold(settings.noiseFloorDb)
+    : settings.vadThreshold
+}
+
+/** 保证至少有一套配置，并且 activeProfileId 指向存在的配置。 */
+export function ensureProfiles(settings: Settings): Settings {
+  if (settings.audioProfiles.length > 0) {
+    // 旧配置档没有 nativeInput 字段，补齐为「跟随系统默认」。
+    const profiles = settings.audioProfiles.map((profile) => ({
+      ...profile,
+      nativeInput: typeof profile.nativeInput === 'string' ? profile.nativeInput : '',
+    }))
+    const active = profiles.some((item) => item.id === settings.activeProfileId)
+    return {
+      ...settings,
+      audioProfiles: profiles,
+      activeProfileId: active ? settings.activeProfileId : profiles[0].id,
+    }
+  }
+  const profile = captureAudioProfile(settings, newProfileId(), '默认')
+  return { ...settings, audioProfiles: [profile], activeProfileId: profile.id }
+}
+
 export function loadSettings(): Settings {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
-    if (!raw) return { ...defaultSettings }
+    if (!raw) return ensureProfiles({ ...defaultSettings, audioProfiles: [], activeProfileId: '' })
     const parsed = migrateDefaults(JSON.parse(raw) as Partial<Settings>)
     const legacyDevice = (value: unknown) =>
       typeof value === 'string' && value.includes('(') && value.includes(')') ? '' : value
-    return {
+    // 旧版本用布尔 noiseSuppress；升级时按「关 → off、开 → chromium」映射。
+    const legacySuppress = (parsed as { noiseSuppress?: boolean }).noiseSuppress
+    const suppressor: NoiseSuppressor = noiseSuppressors.some(
+      (item) => item.id === parsed.noiseSuppressor,
+    )
+      ? (parsed.noiseSuppressor as NoiseSuppressor)
+      : legacySuppress === false
+        ? 'off'
+        : defaultSettings.noiseSuppressor
+    const result: Settings = {
       ...defaultSettings,
       ...parsed,
       inputDevice: (legacyDevice(parsed.inputDevice) as string) ?? defaultSettings.inputDevice,
+      nativeInput: typeof parsed.nativeInput === 'string' ? parsed.nativeInput : '',
       outputDevice:
         (legacyDevice(parsed.outputDevice) as string) ?? defaultSettings.outputDevice,
+      inputMode:
+        parsed.inputMode === 'ptt' || parsed.inputMode === 'open' ? parsed.inputMode : 'vad',
+      inputSensitivity: parsed.inputSensitivity === 'manual' ? 'manual' : 'auto',
+      noiseSuppressor: suppressor,
+      highPass: parsed.highPass !== false,
+      gateDepth: Number.isFinite(parsed.gateDepth)
+        ? Math.max(0, Math.min(40, Number(parsed.gateDepth)))
+        : defaultSettings.gateDepth,
+      noiseFloorDb: Number.isFinite(parsed.noiseFloorDb)
+        ? Math.max(-90, Math.min(-20, Number(parsed.noiseFloorDb)))
+        : defaultSettings.noiseFloorDb,
+      voiceHoldMs: Number.isFinite(parsed.voiceHoldMs)
+        ? Math.max(100, Math.min(1000, Number(parsed.voiceHoldMs)))
+        : defaultSettings.voiceHoldMs,
       hotkeys: { ...defaultSettings.hotkeys, ...(parsed.hotkeys ?? {}) },
       blocked: Array.isArray(parsed.blocked) ? parsed.blocked : [],
+      audioProfiles: Array.isArray(parsed.audioProfiles) ? parsed.audioProfiles : [],
+      activeProfileId:
+        typeof parsed.activeProfileId === 'string' ? parsed.activeProfileId : '',
     }
+    return ensureProfiles(result)
   } catch {
-    return { ...defaultSettings }
+    return ensureProfiles({ ...defaultSettings, audioProfiles: [], activeProfileId: '' })
   }
 }
 

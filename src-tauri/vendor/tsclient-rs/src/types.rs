@@ -160,6 +160,7 @@ pub struct PokeEvent {
 
 #[derive(Debug, Clone)]
 pub struct VoiceData {
+    pub packet_id: u16,
     pub client_id: i32,
     pub codec: i32,
     pub data: Bytes,

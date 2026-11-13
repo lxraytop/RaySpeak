@@ -1218,12 +1218,6 @@ textarea::placeholder {
   font-size: 9.5px;
   color: var(--soft);
 }
-.mc-self-hint {
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
 .group-chips {
   display: inline-flex;
   align-items: center;
@@ -1788,6 +1782,24 @@ textarea::placeholder {
   font-size: 9.5px;
   color: var(--soft);
   font-variant-numeric: tabular-nums;
+}
+
+.vb-profile {
+  margin-left: 6px;
+  display: inline-flex;
+  min-width: 0;
+}
+
+.vb-profile select {
+  max-width: 130px;
+  padding: 3px 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm, 6px);
+  background: var(--sunken);
+  color: var(--ink-2);
+  font-size: 10.5px;
+  outline: none;
+  cursor: pointer;
 }
 
 .meter {
@@ -6444,5 +6456,170 @@ textarea::placeholder {
   margin: 8px 0 0;
   font-size: 10.5px;
   line-height: 1.55;
+  color: var(--danger);
+}
+
+/* 输入电平条：实时电平 + 发送阈值刻度 + 底噪标记（对齐 TS3 / Discord 的输入电平） */
+.level-meter {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin: 2px 0 10px;
+}
+
+.level-track {
+  position: relative;
+  height: 12px;
+  border-radius: 999px;
+  background: var(--sunken);
+  overflow: hidden;
+}
+
+.level-fill {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--green), var(--accent));
+  transition: width 0.08s linear;
+}
+
+.level-peak {
+  position: absolute;
+  top: -1px;
+  bottom: -1px;
+  width: 2px;
+  background: var(--danger);
+  opacity: 0.9;
+}
+
+.level-floor {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--soft);
+  opacity: 0.6;
+}
+
+.level-scale {
+  display: flex;
+  justify-content: space-between;
+  font-size: 10.5px;
+  color: var(--soft);
+}
+
+.level-readout {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.level-readout .on {
+  color: var(--green-deep);
+  font-weight: 500;
+}
+
+/* 语音处理预设：chips 形式，命中预设时高亮，「自定义」只读 */
+.audio-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 10px;
+}
+
+.audio-chip {
+  padding: 5px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--line-strong);
+  background: var(--panel-soft);
+  color: var(--ink-2);
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+
+.audio-chip:hover {
+  background: var(--hover);
+}
+
+.audio-chip.active {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  cursor: default;
+}
+
+/* 麦克风设备检测结果 */
+.probe-list {
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  border-radius: var(--radius-md, 10px);
+  background: var(--sunken);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.probe-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--ink-2);
+}
+
+.probe-ok,
+.probe-dead {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+
+.probe-ok {
+  background: var(--green);
+}
+
+.probe-dead {
+  background: var(--danger);
+}
+
+.probe-name {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.probe-level {
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
+.probe-hint {
+  color: var(--danger);
+  font-size: 11px;
+}
+
+/* 音频配置档：名称选择 + 保存/重命名/删除 */
+.profile-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.profile-row .select-wrap {
+  min-width: 150px;
+  flex: 1 1 150px;
+}
+
+.set-note.warn {
   color: var(--danger);
 }

@@ -14,6 +14,7 @@ interface Props {
   serverIcon: string
   showIcons: boolean
   onCreate: () => void
+  onSelect: (id: string) => void
   onJoin: (id: string) => void
   onSelectClient: (id: string) => void
   onRefresh: () => void
@@ -32,6 +33,7 @@ export function ChannelSidebar({
   serverIcon,
   showIcons,
   onCreate,
+  onSelect,
   onJoin,
   onSelectClient,
   onRefresh,
@@ -165,6 +167,7 @@ export function ChannelSidebar({
                 showIcons={showIcons}
                 query={query}
                 onToggle={toggle}
+                onSelect={onSelect}
                 onJoin={onJoin}
                 onSelectClient={onSelectClient}
               />

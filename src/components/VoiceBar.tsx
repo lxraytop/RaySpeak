@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react'
 import { Columns2, LayoutGrid, Mic, MicOff, Settings, Volume2 } from 'lucide-react'
 import type { LayoutId } from '../types'
+import type { AudioProfile } from '../settings'
 
 interface Props {
   muted: boolean
@@ -10,6 +11,9 @@ interface Props {
   inputVolume: number
   codecLabel: string
   layout: LayoutId
+  profiles: AudioProfile[]
+  activeProfileId: string
+  onProfile: (id: string) => void
   onToggleMute: () => void
   onToggleDeafen: () => void
   onOpenSettings: () => void
@@ -25,6 +29,9 @@ export function VoiceBar({
   inputVolume,
   codecLabel,
   layout,
+  profiles,
+  activeProfileId,
+  onProfile,
   onToggleMute,
   onToggleDeafen,
   onOpenSettings,
@@ -108,6 +115,18 @@ export function VoiceBar({
           </span>
           <span className="vb-gain">{inputVolume}%</span>
         </div>
+
+        {profiles.length > 1 && (
+          <label className="vb-profile" title="切换音频配置档">
+            <select value={activeProfileId} onChange={(event) => onProfile(event.target.value)}>
+              {profiles.map((profile) => (
+                <option key={profile.id} value={profile.id}>
+                  {profile.name}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
       </div>
 
       <div className="vb-layout" title="切换房间布局">

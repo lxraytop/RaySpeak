@@ -109,9 +109,51 @@ export interface PokeEvent {
 }
 
 export interface VoiceEvent {
+  packetId: number
   clientId: number
   codec: number
   data: string
+}
+
+export interface NativeAudioClientConfig {
+  clid: number
+  volume: number
+  muted: boolean
+}
+
+export interface NativeAudioConfig {
+  micEnabled: boolean
+  inputDevice: string | null
+  inputVolume: number
+  inputMuted: boolean
+  inputMode: 'vad' | 'ptt' | 'open'
+  vadThreshold: number
+  voiceHoldMs: number
+  musicMode: boolean
+  bitrate: number
+  frameSize: number
+  stereo: boolean
+  noiseSuppressor: 'off' | 'gate' | 'chromium' | 'speex' | 'rnnoise'
+  highPass: boolean
+  gateDepth: number
+  autoGain: boolean
+}
+
+export interface NativeAudioClientStats {
+  clid: number
+  jitterMs: number
+  lossPct: number
+  concealed: number
+}
+
+export interface NativeAudioStats {
+  micActive: boolean
+  micDevice: string | null
+  micRate: number
+  micLevelDb: number
+  micGate: boolean
+  micFrames: number
+  micOverruns: number
 }
 
 export const isTauri =
@@ -186,6 +228,12 @@ export const protocol = {
   uploadAvatar: (data: string) => invoke<string>('upload_avatar', { data }),
   deleteAvatar: () => invoke<void>('delete_avatar'),
   setVoiceEnabled: (enabled: boolean) => invoke<void>('set_voice_enabled', { enabled }),
+  applyNativeAudio: (config: NativeAudioConfig) =>
+    invoke<void>('apply_native_audio', { config }),
+  listNativeAudioInputs: () => invoke<string[]>('list_native_audio_inputs'),
+  setNativePtt: (active: boolean) => invoke<void>('set_native_ptt', { active }),
+  nativeAudioStats: () => invoke<NativeAudioStats>('native_audio_stats'),
+  probeMicDevices: () => invoke<string>('probe_mic_devices'),
   sendVoiceData: (data: string, codec: number) =>
     invoke<void>('send_voice_data', { data, codec }),
   setAudioState: (inputMuted: boolean, outputMuted: boolean) =>

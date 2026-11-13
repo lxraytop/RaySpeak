@@ -29,6 +29,7 @@
 - `permissions`：当前身份权限缓存
 - `resolved_host`：SRV 解析出的文件传输主机（仅内部）
 - `pending_deep_link`：冷启动深链，等待前端取走
+- `audio: Mutex<Option<Arc<AudioEngine>>>`：可选原生播放引擎
 
 ### 非 Send future
 
@@ -200,13 +201,51 @@ ServerQuery 会话。真正的开关是 `channelsubscribeall`：连接成功后 
 
 ### 语音
 
-`useVoice.ts`：
+`useVoice.ts`（默认播放路径）：
 
-- 采集：`getUserMedia` → AudioWorklet 20ms 分帧
+- 采集：`getUserMedia` → AudioWorklet 20ms 分帧 → 高通/噪声门/软限幅 → VAD 门控/预缓冲
+- 降噪：`noiseSuppressor` 五选一（off / gate / chromium / speex / rnnoise）。
+  WebView 链路只有 Chromium 谱减与自研噪声门，SpeexDSP 与 RNNoise 需要原生采集；
+  `effectiveNoiseSuppressor()` 负责降级，设置页会标注实际生效的方式
+- 门控：三种输入模式（`vad` / `ptt` / `open`）。`vad` 下灵敏度可自动
+  （按环境底噪 min-tracker 上浮 9 dB，校准值存 `noiseFloorDb`）或手动；
+  保持时长 `voiceHoldMs` 由设置下发，起停各 12 ms 淡入淡出
 - 编码：WebCodecs Opus → base64 → `send_voice_data`
-- 解码：`ts://voice` → 每用户独立解码器 → 抖动缓冲 → 独立音量
+- 接收：`ts://voice` → 按 `packetId` 重排/去重 → 每用户独立解码器 → 自适应抖动缓冲 → 独立音量
+- 电平：采集帧通过 `rayspeak:level` 广播 `{ level, db, floorDb, thresholdDb }`，
+  设置页据此绘制与真实链路一致的电平条（未连接时退回本地测试采集）
 - 说话态由收包时间推导；本地静音/闭麦通过 `set_audio_state` 同步
 - 屏幕共享仅本地预览（TS3 协议不传视频）
+
+`src-tauri/src/audio.rs`（设置 → 麦克风 → 原生采集，实验性、默认关闭）：
+
+> 播放只有一条路径：前端 WebView2 + WebCodecs。早先的 WASAPI 原生播放
+> （`nativeAudio` / 原生输出设备 / 播放管线卡片）已经整体移除，原因见本节末尾。
+
+- `cpal` 输入流按设备支持的采样率采集（`pick_input_config` 优先 48 kHz，
+  其次 44.1 kHz，最后取范围上限），Rust 内用线性插值 `resample_into`
+  统一拉回 48 kHz 单声道，10 ms 一帧进入音频线程。
+- 重采样步进带伺服：`trim = clamp((occupancy - target) / target * 0.05, ±0.005)`，
+  用 ±0.5% 的速率微调吸收设备时钟漂移。**不要改成整块丢样本**，波形断裂
+  会被听成「咔哒 / 电流声」。
+- `SpeexApm`（`aec-rs-sys`）只做 NS/AGC——原生采集没有播放参考信号，
+  启用 AEC 只会把近端人声也削弱。
+- 后处理链 `MicDsp` 与前端 Worklet 同序：80 Hz 高通 → RNNoise（可选）→
+  **电平测量** → 噪声门（可选）→ 软限幅。RNNoise 用 `nnnoiseless`，480 帧、
+  ±32768 标定；切换降噪方式时重建状态并丢弃首帧伪影。
+- VAD/PTT/常开门控、`voiceHoldMs` 保持、预滚与起止淡入淡出都在 Rust 内完成，
+  随后用 `audiopus::Encoder` 编码并直接调用 `Client::send_voice`，不经过前端。
+- 锁序：编码只把包压进 `pending_send`，由 tick 线程在 `Worker` 锁外发送，
+  避免与收包线程形成 `core → worker` 的反向嵌套。
+- 前端只负责下发配置与 PTT 状态（`set_native_ptt`）；开启原生采集后
+  `useVoice` 不再调用 `getUserMedia`，避免双路采集与回声。
+- 诊断通过 `native_audio_stats` 的 `mic*` 字段暴露（设备、电平、发送门、
+  已发送帧、输入溢出），设置页仅在原生采集开启时显示该卡片。
+
+**为什么删掉原生播放**：它需要 WASAPI 输出回调与麦克风共享参考信号（`EchoRef`
+FIFO），而设备块长 240/480/960 不固定，参考与采集极易错位，AEC 不收敛；
+同时设备时钟与系统定时器不同步会周期性欠载。现在解码/抖动/混音全部回到
+WebView，由 Chromium 的 AEC 统一处理。
 
 ## 4. 打包与图标
 

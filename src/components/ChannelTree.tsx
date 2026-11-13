@@ -15,6 +15,7 @@ interface TreeProps {
   showIcons: boolean
   query?: string
   onToggle: (id: string) => void
+  onSelect: (id: string) => void
   onJoin: (id: string) => void
   onSelectClient: (id: string) => void
 }
@@ -29,6 +30,7 @@ function ChannelNode({
   showIcons,
   query,
   onToggle,
+  onSelect,
   onJoin,
   onSelectClient,
   selfId,
@@ -66,12 +68,14 @@ function ChannelNode({
           spacer ? 'is-spacer' : ''
         }`}
         data-channel-id={channel.id}
-        onClick={() => onJoin(channel.id)}
+        onClick={() => onSelect(channel.id)}
+        onDoubleClick={() => onJoin(channel.id)}
         title={[
           count > 0 ? `${count} 人在频道：${memberNames}${count > 8 ? '…' : ''}` : '当前无人在线',
           channel.maxClients ? `上限 ${channel.maxClients} 人` : '',
           `${channel.codec} · ${channel.bitrate}kbps`,
           children.length > 0 ? `${children.length} 个子频道` : '',
+          '双击进入频道',
         ]
           .filter(Boolean)
           .join(' · ')}
@@ -166,6 +170,7 @@ function ChannelNode({
               showIcons={showIcons}
               query={query}
               onToggle={onToggle}
+              onSelect={onSelect}
               onJoin={onJoin}
               onSelectClient={onSelectClient}
               selfId={selfId}
@@ -199,6 +204,7 @@ export function ChannelTree(props: TreeProps) {
           showIcons={props.showIcons}
           query={props.query}
           onToggle={props.onToggle}
+          onSelect={props.onSelect}
           onJoin={props.onJoin}
           onSelectClient={props.onSelectClient}
           selfId={props.selfId}

@@ -8,6 +8,7 @@
 | Node.js | 20+ | 当前 20.15.0 |
 | npm | 10+ | 当前 10.7.0 |
 | Rust | 1.85+ | 当前 1.99.1 |
+| CMake | 3.20+ | libopus 静态编译；VS BuildTools 自带 |
 | Tauri CLI | 2.x | 由 npm devDependency 提供 |
 
 本机 Rust 安装在非 C 盘，使用前执行：
@@ -32,10 +33,31 @@ npm run typecheck  # TypeScript 检查
 
 ## 3. 构建
 
+完整的打包步骤、工具链依赖与常见报错见 [PACKAGING.md](PACKAGING.md)。
+
 ```bash
 # 前端 + Rust + NSIS
 npm run app:build
 ```
+
+`app:dev` / `app:build` 由 `scripts/tauri-run.mjs` 包装：它会从 `vswhere` 找到
+Visual Studio BuildTools 自带的 CMake，并设置 `CMAKE_POLICY_VERSION_MINIMUM=3.5`
+（`audiopus_sys` 内置的 Opus 1.3 仍声明 `cmake_minimum_required(VERSION 3.1)`）。
+直接运行 cargo 时，把 BuildTools 的
+`Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin` 加入 `PATH` 即可。
+
+原生音频依赖（`cpal`、`audiopus`/libopus、`aec-rs-sys`/SpeexDSP）只影响构建，
+不需要用户侧安装任何东西；libopus 与 speexdsp 都以静态库链接进 exe。
+
+`aec-rs-sys` 在构建时用 bindgen 生成绑定，需要 `libclang`。`scripts/tauri-run.mjs`
+会自动从 pip 的用户目录查找 `libclang.dll`；如果没有，安装一次：
+
+```bash
+python -m pip install --user libclang
+```
+
+直接运行 `cargo check` 时还需要手动设置 `LIBCLANG_PATH`（指向包含
+`libclang.dll` 的目录）与 `CMAKE`，否则构建脚本会失败。
 
 输出：
 
@@ -128,7 +150,8 @@ tsclient-rs = { path = "vendor/tsclient-rs" }
    - `notifyserveredited` / `notifyserverupdated` 合并
    - `ClientInfo.avatar` 解析与通知更新
    - `set_own_avatar` 与 `update_client` 可见性
-3. `cargo check` 确认所有 `ClientInfo` 构造器都已补新字段
+   - `VoiceData.packet_id` 与语音事件同步派发（见 `docs/PROTOCOL.md` 第 8 节）
+3. `cargo check` 确认所有 `ClientInfo` / `VoiceData` 构造器都已补新字段
 4. 实机验证服务器卡片、头像、消息、图标与文件传输
 
 ## 6. 常见问题

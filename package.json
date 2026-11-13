@@ -7,10 +7,11 @@
     "dev": "vite",
     "build": "vite build",
     "typecheck": "tsc --noEmit",
+    "audio:check": "node scripts/audio-check.mjs",
     "preview": "vite preview",
     "tauri": "tauri",
-    "app:dev": "tauri dev",
-    "app:build": "tauri build"
+    "app:dev": "node scripts/tauri-run.mjs dev",
+    "app:build": "node scripts/tauri-run.mjs build"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",

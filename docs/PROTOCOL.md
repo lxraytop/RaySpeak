@@ -151,6 +151,9 @@ TS3 UID 为 20 字节 SHA-1 base64，文件名 40 个字母；TS6 为 32 字节�
 5. `client_move()` 与 `ftinitupload` / `ftinitdownload` 的 `cpw` 现在统一过
    `prepare_client_password()`（`base64(sha1())`）；crate 原本只对登录密码和默认频道
    密码做了哈希，`clientmove` 漏了，表现为“密码正确也回 781”。该函数改为 `pub(crate)`。
+6. 语音包解析：`VoiceData` 增加 16 位 `packet_id`（payload 前两字节），前端用它排序、
+   去重和检测丢包；`handle_voice_packet` / `Event::VoiceData` 改为同步调用 handler，
+   不再每包 `tokio::spawn`。异步派发会让多线程 runtime 打乱语音包顺序，听感是持续爆音。
 
 升级 `tsclient-rs` 时需逐条重新应用，并确认公开类型新增字段没有遗漏构造器。
 
@@ -174,10 +177,19 @@ TS3 UID 为 20 字节 SHA-1 base64，文件名 40 个字母；TS6 为 32 字节�
 ## 11. 语音
 
 - `tsclient-rs` 提供 Opus 语音事件；前端 `useVoice.ts` 负责采集/编码/解码/播放。
+- 语音包载荷（服务器下行）：`[packetId u16][clientId u16][codec u8][opus data]`。
+  `packetId` 由发送端逐包递增（16 位回绕），服务器转发时补上 `clientId`。
+  接收端按它排序、去重、检测丢包；乱序/重复包不能直接交给解码器。
+- 语音事件必须同步派发（不能每包 `tokio::spawn`），否则包顺序会在 runtime 内被打乱。
 - 编解码器编号：0 Speex Narrow、1 Speex Wide、2 Speex Ultra、3 CELT Mono、
   4 Opus、5 Opus Music。
 - 频道 quality → 码率换算：`(quality * 12).clamp(8, 510)` kbps；无数据时默认 64。
 - `clientupdate client_input_muted/client_output_muted` 同步本地静音/闭麦状态。
+- 昵称用 `clientupdate client_nickname=...`；**个人简介不能走 clientupdate**：
+  必须 `clientedit clid=<self> client_description=...`（权限
+  `b_client_modify_own_description`）。写错命令时服务器不报错也不会改，
+  客户端看起来「同步了」但别人看到的简介始终是旧的。
+  新描述可空（`client_description=`）表示清空。
 - 服务器不转发视频，屏幕共享只是本地预览。
 
 ## 12. 深链（应用层，不是 TS 协议）

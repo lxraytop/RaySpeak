@@ -24,6 +24,14 @@ md-5 = "0.10"
 tauri-plugin-notification = "2.4.0"
 tauri-plugin-deep-link = "2"
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
+cpal = "0.18"
+audiopus = { version = "0.3.0-rc.0", default-features = false, features = ["encoder", "decoder"] }
+ringbuf = "0.6"
+# SpeexDSP APM (AEC/NS/AGC): the FFI crate bundles the C library and builds it
+# with CMake; bindgen needs libclang at build time (see scripts/tauri-run.mjs).
+aec-rs-sys = "1.0"
+nnnoiseless = { version = "0.5", default-features = false }
+rustfft = "6"
 
 [patch.crates-io]
 # Vendored to expose the `initserver` properties (server name/icon) that

@@ -64,6 +64,36 @@ Rust 侧可为 `build_snapshot`、`server_info_from_properties`、
 若怀疑错过 `server/channel` 通知，当前没有“强制重拉 channellist”的公开 API。
 可在 vendor 中增加安全的目录重建入口，或在刷新时提示用户重连。
 
+### 2.6 语音质量
+
+已完成（分支 `feat/voice-quality-p0`）：Opus 调优、单次 VAD 门控 + hold/预缓冲、
+默认 AGC、按人自适应抖动缓冲、单/立体声正确解码、非 Opus 编码提示。
+第二轮：语音事件同步派发、16 位 packet id 排序/去重、丢包重复帧补偿、
+起播与 VAD 边界淡入淡出。
+第三轮（P1a）：可选原生播放引擎（cpal/WASAPI + libopus + 抖动缓冲/PLC/FEC）。
+（已在后续批次删除：缺少播放参考导致 AEC 不收敛，设备时钟漂移又会周期性欠载。）
+第四轮（P1b）：可选原生采集（cpal/WASAPI + SpeexDSP AEC/NS/AGC + Opus 编码），
+默认关闭，采集侧自带 VAD/PTT 门控与诊断；AEC 需要原生播放提供参考信号。
+由于开发机无法实测麦克风，P1b 仍按实验特性处理。
+第五轮（`feat/denoise-choice`）：降噪五选一（关闭 / 噪声门 / Chromium / SpeexDSP / RNNoise），
+前端 Worklet 与 Rust `MicDsp` 同序实现高通、门控、软限幅；自动灵敏度与底噪校准。
+第六轮（`feat/audio-reliability`）：回声参考改 FIFO（修复设备块长变化导致的错位）、
+发包移出 `Worker` 锁（消除与收包线程的锁序倒置）、设备错误重建输出流、
+任意采样率麦克风（线性重采样）、原生采集失败自动回退、混音软限幅。
+新增可自行运行的验证：`npm run audio:check`、`cargo test --lib`、
+`rayspeak.exe --mic-diag` / `--mic-scan`。
+
+仍待做（按收益排序）：
+
+- **真机听感验收**：AEC 收敛质量、NS 档位主观差异、外放/耳机与 PTT/VAD 的延迟手感。
+  本机自检能证明「设备可打开、回调节奏正常、DSP 数值正确」，但听感仍需人耳。
+- **WebView 链路的 RNNoise**：把 `nnnoiseless` 编成 WASM 进 Worklet，
+  让默认链路也能用神经网络降噪（目前仅原生采集可用）。
+- **AEC3 升级**：WebRTC APM 的 bundled 构建在本机 MSVC 工具链下不可用
+  （Meson 传 GCC 专用参数），后续可引入 clang/LLVM 构建链替换 SpeexDSP。
+- **弱网**：按丢包率动态调码率与 FEC；音乐模式更高码率立体声。
+- **兼容性**：解码 Speex/CELT（codec 0–3），覆盖使用旧编码的成员。
+
 ## 3. 中优先级
 
 - **消息体验**：时间分组、复制多条、链接跳转、未读定位、发送失败重试 UI

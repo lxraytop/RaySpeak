@@ -4,6 +4,9 @@ use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
+mod audio;
+mod micdiag;
+
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use md5::{Digest as _, Md5};
 use serde::Serialize;
@@ -102,6 +105,7 @@ struct Bridge {
     resolved_host: Arc<Mutex<Option<String>>>,
     channel_quality: Mutex<HashMap<u64, u32>>,
     pending_deep_link: Mutex<Option<String>>,
+    audio: Mutex<Option<Arc<audio::AudioEngine>>>,
 }
 
 impl Bridge {
@@ -125,6 +129,7 @@ impl Bridge {
             resolved_host: Arc::new(Mutex::new(None)),
             channel_quality: Mutex::new(HashMap::new()),
             pending_deep_link: Mutex::new(None),
+            audio: Mutex::new(None),
         }
     }
 }
@@ -530,13 +535,15 @@ fn attach_handlers(client: &Client, app: &AppHandle, bridge: Arc<Bridge>) {
     let voice_app = app.clone();
     let voice_bridge = bridge.clone();
     client.on_voice_data(Arc::new(move |event| {
-        if !voice_bridge.voice_enabled.load(Ordering::Relaxed) {
-            return;
-        }
         if let Event::VoiceData(voice) = event {
+            // 播放统一在 WebView（Chromium + WebCodecs），这里只负责转发。
+            if !voice_bridge.voice_enabled.load(Ordering::Relaxed) {
+                return;
+            }
             let _ = voice_app.emit(
                 "ts://voice",
                 serde_json::json!({
+                    "packetId": voice.packet_id,
                     "clientId": voice.client_id,
                     "codec": voice.codec,
                     "data": BASE64.encode(voice.data),
@@ -667,6 +674,9 @@ async fn connect_server(
     if let Some(previous) = bridge.client.lock().unwrap().take() {
         spawn_disconnect(previous);
     }
+    if let Some(engine) = bridge.audio.lock().unwrap().clone() {
+        engine.set_client(None);
+    }
     bridge.last_snapshot.lock().unwrap().clear();
     bridge.permissions.lock().unwrap().take();
     bridge.icon_cache.lock().unwrap().clear();
@@ -737,7 +747,11 @@ async fn connect_server(
             *job_bridge.groups.lock().unwrap() = groups;
             *job_bridge.channel_quality.lock().unwrap() = quality;
             job_bridge.self_clid.store(self_clid, Ordering::Relaxed);
-            *job_bridge.client.lock().unwrap() = Some(Arc::new(client));
+            let client = Arc::new(client);
+            *job_bridge.client.lock().unwrap() = Some(client.clone());
+            if let Some(engine) = job_bridge.audio.lock().unwrap().clone() {
+                engine.set_client(Some(client));
+            }
             *job_bridge.last_snapshot.lock().unwrap() =
                 serde_json::to_string(&snapshot).unwrap_or_default();
 
@@ -759,6 +773,9 @@ async fn disconnect_server(state: State<'_, Arc<Bridge>>) -> Result<(), String> 
     bridge.generation.fetch_add(1, Ordering::SeqCst);
     bridge.voice_enabled.store(false, Ordering::Relaxed);
     bridge.permissions.lock().unwrap().take();
+    if let Some(engine) = bridge.audio.lock().unwrap().clone() {
+        engine.set_client(None);
+    }
     if let Some(client) = bridge.client.lock().unwrap().take() {
         spawn_disconnect(client);
     }
@@ -1125,25 +1142,38 @@ async fn update_self(
 ) -> Result<(), String> {
     let bridge = state.inner().clone();
     let client = get_client(&bridge)?;
-    let mut parts = Vec::new();
+    let self_clid = bridge.self_clid.load(Ordering::Relaxed);
+    let mut commands: Vec<String> = Vec::new();
     if let Some(nickname) = nickname {
-        if !nickname.trim().is_empty() {
-            parts.push(format!("client_nickname={}", escaped(nickname.trim())));
+        let trimmed = nickname.trim();
+        if !trimmed.is_empty() {
+            commands.push(format!("clientupdate client_nickname={}", escaped(trimmed)));
         }
     }
     if let Some(description) = description {
-        parts.push(format!("client_description={}", escaped(&description)));
+        // clientupdate 不接受 client_description；改自己的简介必须走 clientedit
+        // （服务器权限 b_client_modify_own_description）。
+        if self_clid <= 0 {
+            return Err("尚未连接到服务器".to_string());
+        }
+        commands.push(format!(
+            "clientedit clid={} client_description={}",
+            self_clid,
+            escaped(description.trim())
+        ));
     }
-    if parts.is_empty() {
+    if commands.is_empty() {
         return Ok(());
     }
-    let command = format!("clientupdate {}", parts.join(" "));
     run_proto(bridge, move |runtime| {
         runtime.block_on(async move {
-            client
-                .exec_command(&command, 5000)
-                .await
-                .map_err(clean_error)
+            for command in commands {
+                client
+                    .exec_command(&command, 5000)
+                    .await
+                    .map_err(clean_error)?;
+            }
+            Ok(())
         })
     })
     .await
@@ -1699,6 +1729,38 @@ fn set_voice_enabled(state: State<'_, Arc<Bridge>>, enabled: bool) {
 }
 
 #[tauri::command]
+fn apply_native_audio(state: State<'_, Arc<Bridge>>, config: audio::NativeAudioConfig) {
+    let engine = state.inner().audio.lock().unwrap().clone();
+    if let Some(engine) = engine {
+        engine.apply_config(config);
+    }
+}
+
+#[tauri::command]
+fn list_native_audio_inputs() -> Vec<String> {
+    audio::list_input_devices()
+}
+
+#[tauri::command]
+fn set_native_ptt(state: State<'_, Arc<Bridge>>, active: bool) {
+    if let Some(engine) = state.inner().audio.lock().unwrap().clone() {
+        engine.set_ptt(active);
+    }
+}
+
+#[tauri::command]
+fn native_audio_stats(state: State<'_, Arc<Bridge>>) -> audio::AudioStats {
+    state
+        .inner()
+        .audio
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|engine| engine.snapshot())
+        .unwrap_or_default()
+}
+
+#[tauri::command]
 fn send_voice_data(
     state: State<'_, Arc<Bridge>>,
     data: String,
@@ -1786,6 +1848,22 @@ async fn send_plugin_command_backend(
     .await
 }
 
+/// 麦克风诊断：录 WAV + 客观指标，供 `rayspeak.exe --mic-diag` 使用。
+pub fn mic_diag(seconds: f32) -> String {
+    micdiag::run(seconds)
+}
+
+/// 逐个探测输入设备是否有信号，供 `rayspeak.exe --mic-scan` 使用。
+pub fn mic_scan() -> String {
+    micdiag::scan()
+}
+
+/// 设置页的「检测麦克风输入」：每个设备只录 0.8 秒，避免占用设备太久。
+#[tauri::command]
+fn probe_mic_devices() -> Result<String, String> {
+    Ok(micdiag::scan_devices(0.8))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default();
@@ -1825,6 +1903,9 @@ pub fn run() {
                 }
                 let _ = app.deep_link().register_all();
             }
+            let bridge = app.state::<Arc<Bridge>>();
+            let engine = Arc::new(audio::AudioEngine::start(app.handle().clone()));
+            *bridge.audio.lock().unwrap() = Some(engine);
             Ok(())
         })
         .manage(Arc::new(Bridge::new()))
@@ -1863,6 +1944,11 @@ pub fn run() {
             upload_avatar,
             delete_avatar,
             set_voice_enabled,
+            apply_native_audio,
+            list_native_audio_inputs,
+            set_native_ptt,
+            native_audio_stats,
+            probe_mic_devices,
             send_voice_data,
             set_audio_state,
             set_away,
