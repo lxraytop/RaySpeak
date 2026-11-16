@@ -123,7 +123,7 @@ const protocolRows = [
   ['服务器管理', '踢人/封禁/移动/频道创建编辑删除/自身资料已封装，其余走原始命令', '内核已支持'],
   ['频道组与资料', '频道组、客户端描述、平台与数据库 ID 通过 clientinfo 查询', '内核已支持'],
   ['音频处理', 'WebCodecs Opus、抖动缓冲、AEC/降噪、VAD、立体声与音乐模式', '内核已支持'],
-  ['屏幕共享', '仅有插件命令与 WebRTC 信令通道，媒体传输需自建；当前仅本地预览', '需应用层'],
+  ['屏幕共享', '原生 WGC 采集 + WebRTC，经 EasyTier 公共节点组网，独立页面且不影响语音', '应用层支持'],
   ['ServerQuery', '内核不使用 10011 查询端口，管理命令走客户端连接', '内核不提供'],
   ['好友与头像', 'TS 协议无好友在线态与服务器头像，只能本地存储或生成', '内核不提供'],
 ] as const
@@ -721,7 +721,7 @@ export function SettingsPage({
 
   const copyDiagnostics = async () => {
     const payload = {
-      app: `RaySpeak ${appInfo?.version ?? '0.2.0'}`,
+      app: `RaySpeak ${appInfo?.version ?? '0.3.0'}`,
       dataDir: appInfo?.dataDir ?? 'unknown',
       connected,
       latency,
@@ -924,7 +924,7 @@ export function SettingsPage({
 
         <footer className="settings-nav-foot">
           <span className="version-pill">
-            v{appInfo?.version ?? '0.2.0'} · 协议接入
+            v{appInfo?.version ?? '0.3.0'} · 协议接入
           </span>
           <span>协议内核 tsclient-rs</span>
         </footer>
@@ -2241,6 +2241,134 @@ export function SettingsPage({
                 </SettingRow>
               </SetCard>
 
+              <SetCard
+                title="屏幕共享网络"
+                desc="只影响本机；修改后需停止并重新开启共享网络"
+              >
+                <SettingRow
+                  title="连接方式"
+                  desc="自动：能直连就直连，打洞失败时经公共节点中转；仅 P2P 不经中继，跨网可能连不上；仅中继最稳，但延迟略高"
+                >
+                  <Segmented
+                    value={settings.shareNetwork.transport}
+                    options={[
+                      { value: 'auto', label: '自动' },
+                      { value: 'p2p', label: '仅 P2P' },
+                      { value: 'relay', label: '仅中继' },
+                    ]}
+                    onChange={(transport) =>
+                      onChange({ shareNetwork: { ...settings.shareNetwork, transport } })
+                    }
+                  />
+                </SettingRow>
+                <SettingRow
+                  title="画质优先"
+                  desc="流畅：带宽不足时优先保帧率，适合操作演示；清晰：优先保分辨率，适合文字、代码"
+                >
+                  <Segmented
+                    value={settings.shareNetwork.degradation}
+                    options={[
+                      { value: 'framerate', label: '流畅' },
+                      { value: 'resolution', label: '清晰' },
+                    ]}
+                    onChange={(degradation) =>
+                      onChange({ shareNetwork: { ...settings.shareNetwork, degradation } })
+                    }
+                  />
+                </SettingRow>
+                <SettingRow
+                  title="多节点兜底"
+                  desc="同时连最多 4 个可达节点，单个节点掉线仍能发现成员；关闭后只连测速最快的一个"
+                >
+                  <Switch
+                    checked={settings.shareNetwork.multiRelay}
+                    onChange={(multiRelay) =>
+                      onChange({ shareNetwork: { ...settings.shareNetwork, multiRelay } })
+                    }
+                  />
+                </SettingRow>
+                <SettingRow
+                  title="帮助转发他人流量"
+                  desc="作为公共中继时转发其他房间的数据；关闭只转发本房间，减少流量与隐私暴露"
+                >
+                  <Switch
+                    checked={settings.shareNetwork.relayForeign}
+                    onChange={(relayForeign) =>
+                      onChange({ shareNetwork: { ...settings.shareNetwork, relayForeign } })
+                    }
+                  />
+                </SettingRow>
+                <details className="share-net-advanced">
+                  <summary>高级参数（通常保持默认）</summary>
+                  <SettingRow
+                    title="路由策略"
+                    desc="延迟优先会绕开拥塞链路；最短路径按跳数选路"
+                  >
+                    <Segmented
+                      value={settings.shareNetwork.routeMode}
+                      options={[
+                        { value: 'latency', label: '延迟优先' },
+                        { value: 'shortest', label: '最短路径' },
+                      ]}
+                      onChange={(routeMode) =>
+                        onChange({ shareNetwork: { ...settings.shareNetwork, routeMode } })
+                      }
+                    />
+                  </SettingRow>
+                  <SettingRow
+                    title="MTU"
+                    desc="过大可能被链路分片；自动按 EasyTier 加密后的默认值"
+                  >
+                    <Select
+                      value={String(settings.shareNetwork.mtu)}
+                      options={[
+                        { value: '0', label: '自动（1360）' },
+                        { value: '1200', label: '1200 · 最稳' },
+                        { value: '1300', label: '1300' },
+                        { value: '1360', label: '1360 · 默认' },
+                        { value: '1400', label: '1400' },
+                      ]}
+                      onChange={(value) =>
+                        onChange({
+                          shareNetwork: { ...settings.shareNetwork, mtu: Number(value) },
+                        })
+                      }
+                    />
+                  </SettingRow>
+                  <SettingRow
+                    title="传输压缩"
+                    desc="zstd 对文字、代码窗口收益明显；视频画面收益很小且多占 CPU"
+                  >
+                    <Segmented
+                      value={settings.shareNetwork.compression}
+                      options={[
+                        { value: 'none', label: '关闭' },
+                        { value: 'zstd', label: 'zstd' },
+                      ]}
+                      onChange={(compression) =>
+                        onChange({ shareNetwork: { ...settings.shareNetwork, compression } })
+                      }
+                    />
+                  </SettingRow>
+                  <SettingRow
+                    title="诊断日志级别"
+                    desc="warn 只保留警告与错误；info 会输出路由与发现细节，适合排障"
+                  >
+                    <Segmented
+                      value={settings.shareNetwork.logLevel}
+                      options={[
+                        { value: 'info', label: 'info' },
+                        { value: 'warn', label: 'warn' },
+                        { value: 'error', label: 'error' },
+                      ]}
+                      onChange={(logLevel) =>
+                        onChange({ shareNetwork: { ...settings.shareNetwork, logLevel } })
+                      }
+                    />
+                  </SettingRow>
+                </details>
+              </SetCard>
+
               <SetCard title="预览与诊断" desc="演示事件只在浏览器预览模式生效">
                 <SettingRow
                   title="演示事件"
@@ -2275,7 +2403,9 @@ export function SettingsPage({
                       </div>
                       <span
                         className={`status-chip ${
-                          status === '内核已支持' ? 'online' : status === '需应用层' ? 'pending' : 'unsupported'
+                          status === '内核已支持' || status === '应用层支持'
+                            ? 'online'
+                            : 'unsupported'
                         }`}
                       >
                         {status}
@@ -2332,7 +2462,7 @@ export function SettingsPage({
                   <h2>RaySpeak</h2>
                   <p>为 TeamSpeak 打造的现代第三方桌面客户端</p>
                   <span className="version-pill">
-            v{appInfo?.version ?? '0.2.0'} · 协议接入
+            v{appInfo?.version ?? '0.3.0'} · 协议接入
           </span>
                 </div>
               </section>

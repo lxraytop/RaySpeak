@@ -247,6 +247,31 @@ FIFO），而设备块长 240/480/960 不固定，参考与采集极易错位，
 同时设备时钟与系统定时器不同步会周期性欠载。现在解码/抖动/混音全部回到
 WebView，由 Chromium 的 AEC 统一处理。
 
+### 屏幕共享（独立页面）
+
+屏幕共享完全绕开 TS3：`src/screenShare.ts` 是一个单例服务，页面
+`components/ScreenSharePage.tsx` 只负责展示；切到语音页时服务与
+`RTCPeerConnection`/采集都继续存在，所以共享不会因为换页而中断，也不碰
+`useVoice` 的麦克风与 AudioContext。
+
+```
+ScreenSharePage ──► screenShare.ts ──► protocol.ts ──► src-tauri/src/share/
+                        │                                  ├─ mod.rs     房间派生/命令
+                        │                                  ├─ easytier.rs UAC helper + 内核
+                        │                                  ├─ signal.rs   发现 + TCP 信令
+                        │                                  ├─ stun.rs     虚拟网 STUN
+                        │                                  └─ capture.rs  WGC 帧泵
+                        └─ canvas.captureStream(0) ──► WebRTC ──► EasyTier TUN
+```
+
+- 房间 = `sha256(SERVER_ADDR + channel_id)`，只在 Rust 计算；PIN 参与 EasyTier
+  secret，不同 PIN 进入不同网络。
+- 信令 mesh 走虚拟 IP 的 TCP 47654；媒体走 WebRTC，由 EasyTier 的 P2P 或公共
+  节点中继。
+- 本机 STUN 让 Chromium 在 mDNS 混淆下仍能拿到虚拟网 srflx candidate。
+- 采集是拉取式：前端请求一帧，Rust 才做一次 GPU 读回，并在 CPU 上缩放到目标分辨率。
+- 打包依赖 `src-tauri/resources/easytier/`（`npm run easytier:fetch`，不入库）。
+
 ## 4. 打包与图标
 
 - 窗口：无边框、透明、`minWidth 1080 × 700`

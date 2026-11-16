@@ -6,6 +6,7 @@ import {
   Hand,
   LogIn,
   MessageSquare,
+  MonitorUp,
   Radio,
   Search,
   Send,
@@ -22,6 +23,7 @@ import { stripClientTags, stripTsTags } from '../utils/tsText'
 import { Avatar } from './Avatar'
 import { GroupChip } from './memberBits'
 import { MessageText } from './MessageText'
+import { findShareInvite, stripInviteCode, type ShareInvite } from '../screenShareInvite'
 
 interface Props {
   clients: Client[]
@@ -39,6 +41,7 @@ interface Props {
   onBlock: (client: Client) => void
   onUnblock: (client: Client) => void
   onJoinChannel: (client: Client) => void
+  onShareInvite: (invite: ShareInvite) => void
   onJumpVoice: () => void
   onToast: (message: string) => void
 }
@@ -80,6 +83,7 @@ export function ContactsPage({
   onBlock,
   onUnblock,
   onJoinChannel,
+  onShareInvite,
   onJumpVoice,
   onToast,
 }: Props) {
@@ -344,13 +348,17 @@ export function ContactsPage({
 
             <div className="dm-list-scroll" ref={listRef}>
               <div className="dm-day">今天</div>
-              {activeMessages.map((message) =>
-                message.system ? (
-                  <div className="dm-system" key={message.id}>
-                    <span className="sys-dot" />
-                    {message.text}
-                  </div>
-                ) : (
+              {activeMessages.map((message) => {
+                if (message.system) {
+                  return (
+                    <div className="dm-system" key={message.id}>
+                      <span className="sys-dot" />
+                      {message.text}
+                    </div>
+                  )
+                }
+                const invite = findShareInvite(message.text)
+                return (
                   <div className={`msg ${message.self ? 'is-self' : ''}`} key={message.id}>
                     <span className="msg-avatar static">
                       <Avatar
@@ -375,12 +383,33 @@ export function ContactsPage({
                         <span className="msg-time">{message.time}</span>
                       </div>
                       <p className="msg-text">
-                        <MessageText text={message.text} />
+                        <MessageText
+                          text={
+                            invite
+                              ? stripInviteCode(message.text) || '（屏幕共享邀请）'
+                              : message.text
+                          }
+                        />
                       </p>
+                      {invite && (
+                        <div className="msg-share-invite">
+                          <MonitorUp size={15} strokeWidth={1.9} />
+                          <div className="msg-share-invite-body">
+                            <b>屏幕共享邀请</b>
+                            <span>
+                              {invite.channelName || `频道 ${invite.channelId}`}
+                              {invite.pin ? ' · 含房间 PIN' : ''}
+                            </span>
+                          </div>
+                          <button className="ghost-btn" onClick={() => onShareInvite(invite)}>
+                            加入
+                          </button>
+                        </div>
+                      )}
                     </div>
                   </div>
-                ),
-              )}
+                )
+              })}
               {activeMessages.length === 0 && (
                 <div className="chat-empty dm-chat-empty">
                   <span>还没有私聊消息</span>

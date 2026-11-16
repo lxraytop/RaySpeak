@@ -62,7 +62,7 @@ python -m pip install --user libclang
 输出：
 
 - `src-tauri/target/release/rayspeak.exe`
-- `src-tauri/target/release/bundle/nsis/RaySpeak_0.2.0_x64-setup.exe`
+- `src-tauri/target/release/bundle/nsis/RaySpeak_0.3.0_x64-setup.exe`
 
 只检查 Rust：
 

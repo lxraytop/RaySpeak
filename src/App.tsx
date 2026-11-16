@@ -105,8 +105,10 @@ import {
   FilePanelModal,
   MoveClientModal,
   RoomSettingsModal,
-  ScreenShareModal,
 } from './components/CapabilityModals'
+import { ScreenSharePage } from './components/ScreenSharePage'
+import { screenShare } from './screenShare'
+import type { ShareInvite } from './screenShareInvite'
 import { SettingsPage, type SettingsSection } from './components/SettingsPage'
 
 const VOLUME_KEY = 'rayspeak.volumes.v1'
@@ -138,12 +140,14 @@ const initialDm = clientsSeed.some(
 )
   ? (params.get('dm') as string)
   : 'asara'
-const initialPage: 'voice' | 'contacts' | 'settings' =
+const initialPage: 'voice' | 'contacts' | 'settings' | 'share' =
   params.get('screen') === 'settings'
     ? 'settings'
     : params.get('screen') === 'contacts' || params.get('dm')
       ? 'contacts'
-      : 'voice'
+      : params.get('screen') === 'share'
+        ? 'share'
+        : 'voice'
 const rawModal = params.get('modal')
 const initialModal =
   rawModal === 'invite' ||
@@ -228,7 +232,7 @@ export default function App() {
         theme === 'dark' || theme === 'light' || theme === 'system' ? theme : base.theme,
     }
   })
-  const [page, setPage] = useState<'voice' | 'contacts' | 'settings'>(initialPage)
+  const [page, setPage] = useState<'voice' | 'contacts' | 'settings' | 'share'>(initialPage)
   const [settingsSection, setSettingsSection] = useState<SettingsSection>(initialSection)
   const [settingsReturn, setSettingsReturn] = useState<'voice' | 'contacts'>('voice')
 
@@ -274,9 +278,6 @@ export default function App() {
   const serverInfoBlocked = useRef(false)
   const [muted, setMuted] = useState(false)
   const [deafened, setDeafened] = useState(false)
-  const [sharing, setSharing] = useState(false)
-  const [shareMock, setShareMock] = useState(false)
-  const [shareStream, setShareStream] = useState<MediaStream | null>(null)
   const [presenceMenu, setPresenceMenu] = useState(false)
   const [toast, setToast] = useState<string | null>(null)
   const [contextMenu, setContextMenu] = useState<{
@@ -545,6 +546,25 @@ export default function App() {
   }, [settings.demoEvents, channels])
 
   const notify = useCallback((message: string) => setToast(message), [])
+
+  const [shareActive, setShareActive] = useState(false)
+
+  useEffect(
+    () =>
+      screenShare.subscribe(() => {
+        const snapshot = screenShare.getSnapshot()
+        const active = Boolean(snapshot.sharing || snapshot.viewing)
+        setShareActive((previous) => (previous === active ? previous : active))
+      }),
+    [],
+  )
+
+  useEffect(() => {
+    if (connected || !isTauri) return
+    if (screenShare.getSnapshot().phase === 'online') {
+      void screenShare.stopNetwork()
+    }
+  }, [connected])
 
   const updateSettings = useCallback((patch: Partial<Settings>) => {
     setSettings((prev) => {
@@ -1508,6 +1528,22 @@ export default function App() {
     [demoMode, notify],
   )
 
+  const [shareInvite, setShareInvite] = useState<ShareInvite | null>(null)
+  const clearShareInvite = useCallback(() => setShareInvite(null), [])
+
+  // 屏幕共享邀请码：切到邀请里的频道，并把 PIN / 中继节点交给共享页。
+  // 频道不存在（不同服务器或已删除）时不静默失败。
+  const acceptShareInvite = (invite: ShareInvite) => {
+    const channel = channels.find((item) => item.id === invite.channelId)
+    if (!channel) {
+      notify('邀请码里的频道不在当前服务器，请确认你和好友在同一个服务器')
+      return
+    }
+    joinChannel(channel.id)
+    setPage('share')
+    setShareInvite(invite)
+  }
+
   const handleDeepLink = useCallback(
     (url: string) => {
       const parsed = parseRayLink(url)
@@ -2435,20 +2471,6 @@ export default function App() {
     notify('已恢复默认设置')
   }
 
-  const startShare = (stream: MediaStream | null, mock: boolean) => {
-    setShareStream(stream)
-    setShareMock(mock)
-    setSharing(true)
-  }
-
-  const stopShare = () => {
-    shareStream?.getTracks().forEach((track) => track.stop())
-    setShareStream(null)
-    setShareMock(false)
-    setSharing(false)
-    notify('已停止屏幕共享')
-  }
-
   const handleAppContextMenu = (event: ReactMouseEvent) => {
     const el = event.target as HTMLElement
     const editing =
@@ -2682,7 +2704,11 @@ export default function App() {
     <div className="app" onContextMenu={handleAppContextMenu}>
       <TitleBar connected={connected} latency={latency} />
 
-      <div className={`body ${page === 'contacts' ? 'contacts-mode' : ''}`}>
+      <div
+        className={`body ${page === 'contacts' ? 'contacts-mode' : ''} ${
+          page === 'share' ? 'share-mode' : ''
+        }`}
+      >
         <ServerRail
           muted={muted}
           deafened={deafened}
@@ -2690,12 +2716,14 @@ export default function App() {
           selfAvatar={selfClient?.avatarUrl}
           selfStatus={settings.dnd ? 'busy' : settings.presenceStatus}
           unreadCount={Object.values(unread).reduce((total, value) => total + value, 0)}
-          activeTab={page === 'settings' ? 'settings' : page === 'contacts' ? 'contacts' : 'voice'}
+          activeTab={page}
+          liveShare={shareActive}
           onToggleMute={toggleMute}
           onToggleDeafen={toggleDeafen}
           onNavigate={(tab) => {
             if (tab === 'voice') setPage('voice')
             else if (tab === 'contacts') setPage('contacts')
+            else if (tab === 'share') setPage('share')
             else openSettings('account')
           }}
         />
@@ -2721,7 +2749,22 @@ export default function App() {
               setPage('voice')
               joinChannel(client.channelId)
             }}
+            onShareInvite={acceptShareInvite}
             onJumpVoice={() => setPage('voice')}
+            onToast={notify}
+          />
+        ) : page === 'share' ? (
+          <ScreenSharePage
+            channelId={activeChannel.id}
+            channelName={stripTsTags(activeChannel.name)}
+            nickname={userName}
+            connected={connected}
+            demoMode={demoMode}
+            settings={settings}
+            invite={shareInvite}
+            onChangeSettings={updateSettings}
+            onJoinInvite={acceptShareInvite}
+            onInviteApplied={clearShareInvite}
             onToast={notify}
           />
         ) : (
@@ -2764,16 +2807,6 @@ export default function App() {
                         <Lock size={11} strokeWidth={2.2} />
                       </span>
                     )}
-                    {sharing && (
-                      <button
-                        className="share-pill"
-                        title="打开屏幕共享面板"
-                        onClick={() => setModal('screen')}
-                      >
-                        <MonitorUp size={11} strokeWidth={2.2} />
-                        屏幕共享中
-                      </button>
-                    )}
                   </div>
                   <p className="room-sub">
                     {members.length} 人在线 · {currentCodec} · 延迟{' '}
@@ -2802,6 +2835,10 @@ export default function App() {
                     </button>
                   </div>
 
+                  <button className="ghost-btn" onClick={() => setPage('share')}>
+                    <MonitorUp size={14} strokeWidth={1.9} />
+                    共享
+                  </button>
                   <div className="presence-wrap">
                     <button
                       className={`ghost-btn presence-btn ${selfPresence}`}
@@ -3031,19 +3068,6 @@ export default function App() {
             void deleteServerFile(file)
           }}
           onClose={() => setModal(null)}
-        />
-      )}
-
-      {modal === 'screen' && (
-        <ScreenShareModal
-          channel={activeChannel}
-          sharing={sharing}
-          mock={shareMock}
-          stream={shareStream}
-          onStart={startShare}
-          onStop={stopShare}
-          onClose={() => setModal(null)}
-          onToast={notify}
         />
       )}
 

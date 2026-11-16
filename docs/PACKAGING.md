@@ -18,7 +18,7 @@ npm run app:build
 | 文件 | 说明 |
 | --- | --- |
 | `src-tauri/target/release/rayspeak.exe` | 绿色可执行文件 |
-| `src-tauri/target/release/bundle/nsis/RaySpeak_0.2.0_x64-setup.exe` | 安装包（NSIS，currentUser） |
+| `src-tauri/target/release/bundle/nsis/RaySpeak_0.3.0_x64-setup.exe` | 安装包（NSIS，currentUser） |
 
 > `app:build` 会先执行 `vite build` 生成 `dist/`，再编译 Rust 并调用 NSIS。
 > 不要直接 `npx tauri build`：它会绕过 `scripts/tauri-run.mjs`，导致 CMake 和
@@ -123,7 +123,7 @@ npm run app:build
   ├─ cargo build --release       → src-tauri/target/release/rayspeak.exe
   │    ├─ audiopus_sys (CMake)   → 静态 libopus
   │    └─ aec-rs-sys  (CMake)    → 静态 speexdsp
-  └─ tauri-bundler + makensis    → bundle/nsis/RaySpeak_0.2.0_x64-setup.exe
+  └─ tauri-bundler + makensis    → bundle/nsis/RaySpeak_0.3.0_x64-setup.exe
 ```
 
 安装包特性：

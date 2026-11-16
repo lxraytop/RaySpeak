@@ -115,6 +115,18 @@ Rust 侧可为 `build_snapshot`、`server_info_from_properties`、
   `useConnection`、`useDirectory`、`useMessages`、`useDeepLink`、`useAvatars`
 - 为协议命令建立统一错误类型，避免 `String` 到处透传
 
+## 4.5 屏幕共享
+
+- 双机 + 真实服务器的完整验收（UAC、防火墙、跨 NAT 中继、长时间稳定性）
+- 多人观看的中转树（当前每个观众都由共享者单独上传；可参考 MCTier 的
+  `buildRelayTopology`：owner 两个子节点、每个中转一个子节点）
+- 系统音频的剩余工作：单应用回环（按进程包含而非排除）、设备切换时重建会话、
+  以及不支持进程回环的旧系统上的兼容方案（当前降级为无声画面）
+- 虚拟 IP 冲突检测与一键换 IP；PIN 不一致时的可读提示
+- 跨频道房间码（当前只能按频道派生 + 手动虚拟 IP）
+- 自编译去 Npcap 的 EasyTier（规避 `Packet.dll` 再分发条款）
+- 采集改为 GPU 缩放/硬件编码，降低 4K 高帧率的 CPU 占用
+
 ## 5. 低优先级 / 设计向
 
 - 成员列表虚拟滚动（大频道）

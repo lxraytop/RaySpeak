@@ -1,6 +1,6 @@
 [package]
 name = "rayspeak"
-version = "0.2.0"
+version = "0.3.0"
 description = "RaySpeak TeamSpeak voice client"
 edition = "2021"
 rust-version = "1.77.2"
@@ -18,7 +18,7 @@ tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tsclient-rs = "0.2.7"
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "fs", "io-util"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "fs", "io-util", "net", "process"] }
 base64 = "0.22"
 md-5 = "0.10"
 tauri-plugin-notification = "2.4.0"
@@ -32,6 +32,28 @@ ringbuf = "0.6"
 aec-rs-sys = "1.0"
 nnnoiseless = { version = "0.5", default-features = false }
 rustfft = "6"
+sha2 = "0.10"
+uuid = { version = "1", features = ["v4"] }
+
+[target.'cfg(windows)'.dependencies]
+# Windows Graphics Capture for screen sharing (no WebView2 picker involved).
+windows-capture = "2.0.1"
+# Screen frames ship to the WebView as JPEG: the Tauri IPC path only moves
+# ~106MB/s, so raw 1080p RGBA (~7.3MB/frame) caps capture at 9fps.
+jpeg-encoder = "0.7"
+# #[implement] generates code that references ::windows_core directly.
+windows-core = "0.62"
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Media_Audio",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Console",
+    "Win32_System_Threading",
+    "Win32_System_Variant",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [patch.crates-io]
 # Vendored to expose the `initserver` properties (server name/icon) that

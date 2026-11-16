@@ -156,6 +156,75 @@ export interface NativeAudioStats {
   micOverruns: number
 }
 
+export interface ShareNetworkInfoDto {
+  roomId: string
+  network: string
+  peerId: string
+  nickname: string
+  ip: string
+  signalPort: number
+  nodeId: string
+  nodeLabel: string
+  nodeUri: string
+  nodeLatencyMs: number | null
+}
+
+export interface ShareNodeOptionDto {
+  id: string
+  label: string
+  uri: string
+  protocol: string
+}
+
+export interface ShareNodeProbeDto {
+  id: string
+  label: string
+  uri: string
+  protocol: string
+  latencyMs: number | null
+  jitterMs: number | null
+  reachable: boolean
+}
+
+/** EasyTier 底层参数；只影响下一次开启的共享网络。 */
+export interface ShareNetworkOptionsDto {
+  transport: 'auto' | 'p2p' | 'relay'
+  routeMode: 'latency' | 'shortest'
+  mtu: number
+  compression: 'none' | 'zstd'
+  multiRelay: boolean
+  relayForeign: boolean
+  logLevel: 'info' | 'warn' | 'error'
+}
+
+export interface SharePeerDto {
+  peerId: string
+  nickname: string
+  ip: string
+  connected: boolean
+  latencyMs?: number | null
+}
+
+export interface ShareNetworkStatusDto {
+  phase: string
+  info: ShareNetworkInfoDto | null
+  error: string | null
+}
+
+export interface ShareCaptureSourceDto {
+  id: string
+  name: string
+  kind: 'monitor' | 'window'
+  width: number
+  height: number
+  primary: boolean
+}
+
+export interface ShareCaptureInfoDto {
+  id: string
+  source: ShareCaptureSourceDto
+}
+
 export const isTauri =
   typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 
@@ -247,6 +316,57 @@ export const protocol = {
       target,
       targetId: targetId ?? null,
     }),
+  shareNetworkStart: (
+    channelId: number,
+    nickname: string,
+    pin: string | null,
+    node: string | null,
+    peers: string[] | null,
+    options?: ShareNetworkOptionsDto,
+  ) =>
+    invoke<ShareNetworkInfoDto>('share_network_start', {
+      channelId,
+      nickname,
+      pin,
+      node,
+      peers,
+      options: options ?? null,
+    }),
+  shareNetworkStop: () => invoke<void>('share_network_stop'),
+  shareNetworkStatus: () => invoke<ShareNetworkStatusDto | null>('share_network_status'),
+  shareNetworkLogs: () => invoke<string[]>('share_network_logs'),
+  shareProbeNodes: (custom: string[] = []) =>
+    invoke<ShareNodeProbeDto[]>('share_probe_nodes', { custom }),
+  shareProbeNode: (target: string) =>
+    invoke<ShareNodeProbeDto | null>('share_probe_node', { target }),
+  shareNodeOptions: () => invoke<ShareNodeOptionDto[]>('share_node_options'),
+  sharePeers: () => invoke<SharePeerDto[]>('share_peers'),
+  shareSendSignal: (to: string, message: string) =>
+    invoke<void>('share_send_signal', { to, message }),
+  shareConnectPeer: (ip: string) => invoke<void>('share_connect_peer', { ip }),
+  shareIceServers: () => invoke<string[]>('share_ice_servers'),
+  shareCaptureSources: () => invoke<ShareCaptureSourceDto[]>('share_capture_sources'),
+  shareCaptureStart: (sourceId: string, resolution: number, frameRate: number) =>
+    invoke<ShareCaptureInfoDto>('share_capture_start', {
+      sourceId,
+      resolution,
+      frameRate,
+    }),
+  shareCaptureFrame: (id: string) => invoke<ArrayBuffer>('share_capture_frame', { id }),
+  shareCaptureStats: (id: string) =>
+    invoke<{
+      arrived: number
+      built: number
+      captureMs: number
+      buildMs: number
+      minimized: boolean
+      lastError: string | null
+    } | null>('share_capture_stats', { id }),
+  shareCaptureStop: (id: string) => invoke<void>('share_capture_stop', { id }),
+  shareAudioStart: () => invoke<{ sampleRate: number; channels: number }>('share_audio_start'),
+  shareAudioRead: (maxFrames: number) =>
+    invoke<ArrayBuffer>('share_audio_read', { maxFrames }),
+  shareAudioStop: () => invoke<void>('share_audio_stop'),
 }
 
 export async function listenEvent<T>(
