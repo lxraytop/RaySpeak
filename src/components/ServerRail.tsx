@@ -1,4 +1,4 @@
-import { Headphones, Mic, MicOff, Settings, Users } from 'lucide-react'
+import { Headphones, Mic, MicOff, MonitorUp, Settings, Users } from 'lucide-react'
 import { Avatar } from './Avatar'
 
 interface Props {
@@ -8,14 +8,16 @@ interface Props {
   selfAvatar?: string
   selfStatus?: 'online' | 'away' | 'busy'
   unreadCount?: number
+  liveShare?: boolean
   onToggleMute: () => void
   onToggleDeafen: () => void
-  onNavigate: (tab: 'voice' | 'contacts' | 'settings') => void
-  activeTab: 'voice' | 'contacts' | 'settings'
+  onNavigate: (tab: 'voice' | 'contacts' | 'settings' | 'share') => void
+  activeTab: 'voice' | 'contacts' | 'settings' | 'share'
 }
 
 const tabs = [
   { id: 'voice', label: '语音', icon: Mic },
+  { id: 'share', label: '共享', icon: MonitorUp },
   { id: 'contacts', label: '联系人', icon: Users },
   { id: 'settings', label: '设置', icon: Settings },
 ] as const
@@ -27,6 +29,7 @@ export function ServerRail({
   selfAvatar,
   selfStatus = 'online',
   unreadCount = 0,
+  liveShare = false,
   onToggleMute,
   onToggleDeafen,
   onNavigate,
@@ -38,7 +41,9 @@ export function ServerRail({
         {tabs.map(({ id, label, icon: Icon }) => (
           <button
             key={id}
-            className={`rail-item ${activeTab === id ? 'active' : ''}`}
+            className={`rail-item ${activeTab === id ? 'active' : ''} ${
+              id === 'share' && liveShare ? 'live' : ''
+            }`}
             onClick={() => onNavigate(id)}
           >
             <Icon size={21} strokeWidth={1.8} />

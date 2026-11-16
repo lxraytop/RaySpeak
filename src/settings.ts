@@ -91,6 +91,29 @@ export function newProfileId() {
   return `p${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`
 }
 
+export type ShareTransport = 'auto' | 'p2p' | 'relay'
+
+export interface ShareNetworkSettings {
+  /** 连接方式：自动（直连优先 + 中继兜底）、仅 P2P 或仅中继 */
+  transport: ShareTransport
+  /** 画质优先：流畅（保帧率）或清晰（保分辨率） */
+  degradation: 'framerate' | 'resolution'
+  /** 路由策略：延迟优先（少绕路）或最短跳数 */
+  routeMode: 'latency' | 'shortest'
+  /** 虚拟网 MTU；0 表示 EasyTier 默认（加密时 1360） */
+  mtu: number
+  /** 传输压缩 */
+  compression: 'none' | 'zstd'
+  /** 同时连接多个可达中继做兜底 */
+  multiRelay: boolean
+  /** 作为中继时是否帮助转发其他网络的流量 */
+  relayForeign: boolean
+  /** EasyTier 控制台日志级别（只影响本机诊断面板） */
+  logLevel: 'info' | 'warn' | 'error'
+  /** 用户自建/自选的中继节点（tcp://host:port 等） */
+  customNodes: string[]
+}
+
 export interface Settings {
   nickname: string
   description: string
@@ -161,6 +184,7 @@ export interface Settings {
   fileTransfer: boolean
   autoReconnect: boolean
   timeout: number
+  shareNetwork: ShareNetworkSettings
   demoEvents: boolean
 }
 
@@ -284,6 +308,17 @@ export const defaultSettings: Settings = {
   fileTransfer: true,
   autoReconnect: true,
   timeout: 20,
+  shareNetwork: {
+    transport: 'auto',
+    degradation: 'framerate',
+    routeMode: 'latency',
+    mtu: 0,
+    compression: 'none',
+    multiRelay: true,
+    relayForeign: true,
+    logLevel: 'warn',
+    customNodes: [],
+  },
   demoEvents: false,
 }
 
@@ -467,6 +502,41 @@ export function ensureProfiles(settings: Settings): Settings {
   return { ...settings, audioProfiles: [profile], activeProfileId: profile.id }
 }
 
+const SHARE_MTU_OPTIONS = [0, 1200, 1300, 1360, 1400]
+const CUSTOM_NODE = /^(tcp|udp|ws|wss):\/\/[^\s/]{3,120}$/i
+
+export function normalizeShareNetwork(value: unknown): ShareNetworkSettings {
+  const raw = (value ?? {}) as Partial<ShareNetworkSettings> & { holePunching?: boolean }
+  const mtu = Number(raw.mtu)
+  // 旧版只有一个「P2P 打洞」开关：关掉意味着只走中继。
+  const transport: ShareTransport =
+    raw.transport === 'p2p' || raw.transport === 'relay'
+      ? raw.transport
+      : raw.holePunching === false
+        ? 'relay'
+        : 'auto'
+  const customNodes: string[] = []
+  for (const item of Array.isArray(raw.customNodes) ? raw.customNodes : []) {
+    if (typeof item !== 'string') continue
+    const uri = item.trim()
+    if (!CUSTOM_NODE.test(uri) || customNodes.includes(uri)) continue
+    customNodes.push(uri)
+    if (customNodes.length >= 6) break
+  }
+  return {
+    transport,
+    degradation: raw.degradation === 'resolution' ? 'resolution' : 'framerate',
+    routeMode: raw.routeMode === 'shortest' ? 'shortest' : 'latency',
+    mtu: SHARE_MTU_OPTIONS.includes(mtu) ? mtu : 0,
+    compression: raw.compression === 'zstd' ? 'zstd' : 'none',
+    multiRelay: raw.multiRelay !== false,
+    relayForeign: raw.relayForeign !== false,
+    logLevel:
+      raw.logLevel === 'info' || raw.logLevel === 'error' ? raw.logLevel : 'warn',
+    customNodes,
+  }
+}
+
 export function loadSettings(): Settings {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
@@ -509,6 +579,7 @@ export function loadSettings(): Settings {
       audioProfiles: Array.isArray(parsed.audioProfiles) ? parsed.audioProfiles : [],
       activeProfileId:
         typeof parsed.activeProfileId === 'string' ? parsed.activeProfileId : '',
+      shareNetwork: normalizeShareNetwork(parsed.shareNetwork),
     }
     return ensureProfiles(result)
   } catch {

@@ -6,6 +6,9 @@ use std::time::Duration;
 
 mod audio;
 mod micdiag;
+mod share;
+
+pub use share::easytier::helper_main as share_helper_main;
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use md5::{Digest as _, Md5};
@@ -19,7 +22,7 @@ use tsclient_rs::{
 };
 
 /// Server address is intentionally private: it is never returned to the UI.
-const SERVER_ADDR: &str = "ray.ts3.uno:9987";
+pub(crate) const SERVER_ADDR: &str = "ray.ts3.uno:9987";
 const SERVER_HOST: &str = "ray.ts3.uno";
 const IDENTITY_LEVEL: i32 = 10;
 const ICON_LIMIT: usize = 1024 * 1024;
@@ -1906,6 +1909,7 @@ pub fn run() {
             let bridge = app.state::<Arc<Bridge>>();
             let engine = Arc::new(audio::AudioEngine::start(app.handle().clone()));
             *bridge.audio.lock().unwrap() = Some(engine);
+            share::setup(app);
             Ok(())
         })
         .manage(Arc::new(Bridge::new()))
@@ -1952,7 +1956,26 @@ pub fn run() {
             send_voice_data,
             set_audio_state,
             set_away,
-            send_plugin_command_backend
+            send_plugin_command_backend,
+            share::share_network_start,
+            share::share_network_stop,
+            share::share_network_status,
+            share::share_network_logs,
+            share::share_probe_nodes,
+            share::share_probe_node,
+            share::share_node_options,
+            share::share_peers,
+            share::share_send_signal,
+            share::share_connect_peer,
+            share::share_ice_servers,
+            share::share_capture_sources,
+            share::share_capture_start,
+            share::share_capture_frame,
+            share::share_capture_stats,
+            share::share_capture_stop,
+            share::share_audio_start,
+            share::share_audio_read,
+            share::share_audio_stop
         ])
         .run(tauri::generate_context!())
         .expect("error while running RaySpeak");

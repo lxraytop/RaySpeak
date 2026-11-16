@@ -47,11 +47,19 @@
     本地音量推导
   - 静音状态通过 `clientupdate client_input_muted / client_output_muted`
     同步给服务器
+- 屏幕共享（独立「共享」页，与语音互不干扰）
+  - 房间按当前频道在本地派生，同频道的 RaySpeak 用户自动组网（可选 PIN）
+  - 基于 EasyTier 公共节点建立虚拟局域网，信令与画面都不经过 TeamSpeak 服务器
+  - 内置多个社区公共节点，共享前自动测速并选延迟最低的可达节点
+  - 一键复制邀请码：好友导入后自动切到同频道、同一节点与 PIN
+  - 原生 Windows Graphics Capture 采集显示器/窗口，WebRTC 传输；支持全屏观看
+  - 可选系统声音（WASAPI 进程回环，自动排除 RaySpeak 自身，不会回声）
+  - 画质 720p/1080p/1440p/2160p、30/60/120fps，可选码率上限
+  - 首次开启会请求管理员权限以创建虚拟网卡；内核用
+    `npm run easytier:fetch` 下载，详见 [docs/SCREEN_SHARE.md](docs/SCREEN_SHARE.md)
 
 ## 本地能力（协议不提供或只做本地）
 
-- 屏幕共享面板：使用 `getDisplayMedia` 做本地预览；TeamSpeak 协议不传输
-  视频，共享状态只在本地界面显示
 - 频道动态、联系人「最近会话」、屏蔽名单、音量、主题、布局等设置保存在 localStorage
 - 无头像的成员使用昵称生成的字母头像；服务器图标、频道图标、组图标与
   成员头像均读取服务器真实资源
@@ -106,7 +114,7 @@ npm run app:build
 产物：
 
 - `src-tauri/target/release/rayspeak.exe`
-- `src-tauri/target/release/bundle/nsis/RaySpeak_0.2.0_x64-setup.exe`
+- `src-tauri/target/release/bundle/nsis/RaySpeak_0.3.0_x64-setup.exe`
 
 ## 环境
 
